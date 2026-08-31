@@ -1,0 +1,29 @@
+{
+  "name": "mail-server",
+  "version": "1.0.0",
+  "description": "Self-hosted Mail Server mit Web-UI und MCP-Anbindung: KI legt HTML-Entwürfe an, du sendest per Klick (inkl. Batch).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "launch": "node src/launcher.mjs",
+    "app": "swift run --package-path swift -c release MailServerApp",
+    "mcp": "node src/mcp-server.js",
+    "mcp:http": "MCP_TRANSPORT=http node src/mcp-server.js",
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
+    "dev:web": "npm --prefix frontend run dev"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@whiskeysockets/baileys": "^6.7.24",
+    "express": "^4.21.1",
+    "imapflow": "^1.7.1",
+    "mailparser": "^3.9.15",
+    "nodemailer": "^9.0.5",
+    "qrcode-generator": "^2.0.4",
+    "zod": "^3.23.8"
+  }
+}

@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Firma Info",
+    "host": "smtp.example.com",
+    "port": 587,
+    "secure": false,
+    "username": "info@example.com",
+    "password": "DEIN_PASSWORT",
+    "from_name": "Firma",
+    "from_email": "info@example.com"
+  },
+  {
+    "name": "Firma Support (SSL)",
+    "host": "smtp.example.com",
+    "port": 465,
+    "secure": true,
+    "username": "support@example.com",
+    "password": "DEIN_PASSWORT",
+    "from_name": "Support",
+    "from_email": "support@example.com"
+  }
+]
