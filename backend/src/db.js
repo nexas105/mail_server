@@ -217,6 +217,8 @@ for (const [table, col, def] of [
   ['contacts', 'vars', 'TEXT'],
   // Zustell-Nachverfolgung: Öffnungen (Zählpixel) und Unzustellbarkeit (Bounces).
   ['recipients', 'tracking_token', 'TEXT'],
+  // Unerratbare Versandreferenz (X-Relay-Ref) – Beleg für echte Bounces.
+  ['recipients', 'relay_ref', 'TEXT'],
   ['recipients', 'opened_at', 'TEXT'],
   ['recipients', 'last_open_at', 'TEXT'],
   ['recipients', 'open_count', 'INTEGER NOT NULL DEFAULT 0'],
@@ -235,6 +237,7 @@ for (const [table, col, def] of [
 }
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_recipients_token ON recipients(tracking_token)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_recipients_relay_ref ON recipients(relay_ref)');
 db.exec('CREATE INDEX IF NOT EXISTS idx_recipients_email ON recipients(email)');
 
 // ---- Zustell-Nachverfolgung ----------------------------------------------
@@ -274,18 +277,52 @@ export function recordOpen(token, { client = null } = {}) {
 }
 
 /**
- * Der gesendete Empfänger, auf den sich eine Bounce-Meldung bezieht.
- * Reihenfolge: eigene Empfänger-ID (X-Relay-Recipient) → Message-ID → zuletzt
- * gesendete Mail an die Adresse. Nur Datensätze mit sent_at, damit eine
- * Meldung nie einen noch nicht versendeten Empfänger trifft.
+ * Versandreferenz eines Empfängers – 128 Bit Zufall, beim ersten Versand
+ * erzeugt und als Kopfzeile X-Relay-Ref mitgeschickt. Ein Zustellbericht
+ * zitiert die Originalmail samt Kopfzeilen zurück; wer die Referenz kennt,
+ * hat die Mail also wirklich erhalten. Die fortlaufende Empfänger-ID ist
+ * dagegen erratbar und taugt nicht als Beleg.
  */
-export function findSentRecipient({ email, messageId = null, draftId = null, recipientId = null }) {
+export function ensureRelayRef(recipientId) {
+  const row = db.prepare('SELECT relay_ref FROM recipients WHERE id=?').get(recipientId);
+  if (!row) return null;
+  if (row.relay_ref) return row.relay_ref;
+  const ref = crypto.randomBytes(16).toString('base64url');
+  db.prepare('UPDATE recipients SET relay_ref=? WHERE id=?').run(ref, recipientId);
+  return ref;
+}
+
+/** Konto, über das der Empfänger versendet wurde (Kontobindung für Bounces). */
+export function recipientAccountId(recipient) {
+  if (!recipient?.draft_id) return null;
+  const d = db.prepare('SELECT account_id FROM drafts WHERE id=?').get(recipient.draft_id);
+  return d?.account_id ?? null;
+}
+
+/**
+ * Der gesendete Empfänger, auf den sich eine Bounce-Meldung bezieht.
+ * Reihenfolge: Versandreferenz (X-Relay-Ref, unerratbar) → eigene
+ * Empfänger-ID (X-Relay-Recipient; nur noch für Anzeige/Altbestand, kein
+ * Beleg) → Message-ID → zuletzt gesendete Mail an die Adresse. Nur Datensätze
+ * mit sent_at, damit eine Meldung nie einen noch nicht versendeten Empfänger
+ * trifft.
+ */
+export function findSentRecipient({ email, messageId = null, draftId = null, recipientId = null, relayRef = null }) {
+  if (relayRef && /^[A-Za-z0-9_-]{16,}$/.test(String(relayRef))) {
+    const byRef = db.prepare('SELECT * FROM recipients WHERE relay_ref = ? AND sent_at IS NOT NULL').get(String(relayRef));
+    if (byRef) return byRef;
+    // Eine Referenz ist eindeutig: Passt sie nicht, darf kein schwächeres
+    // Kriterium aus demselben Aufruf greifen.
+    return null;
+  }
   if (recipientId != null && Number.isInteger(Number(recipientId))) {
     const byRecipient = db.prepare('SELECT * FROM recipients WHERE id = ? AND sent_at IS NOT NULL').get(Number(recipientId));
     if (byRecipient) return byRecipient;
   }
   if (messageId) {
-    const byId = db.prepare('SELECT * FROM recipients WHERE message_id = ? ORDER BY id DESC').get(messageId);
+    // nodemailer speichert „<id@host>", ein Zustellbericht zitiert meist nur „id@host".
+    const bare = String(messageId).trim().replace(/^<|>$/g, '');
+    const byId = db.prepare('SELECT * FROM recipients WHERE message_id IN (?, ?) AND sent_at IS NOT NULL ORDER BY id DESC').get(bare, `<${bare}>`);
     if (byId) return byId;
   }
   if (!email) return null;

@@ -196,3 +196,59 @@ export function assertSameOrigin(nextUrl, baseUrl) {
   }
   return a;
 }
+
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * fetch mit selbst verfolgten Weiterleitungen.
+ *
+ * Natives fetch folgt einem 3xx automatisch und prüft das neue Ziel gegen gar
+ * nichts – assertSafeTarget hat aber nur die Startadresse gesehen. Ein
+ * konfigurierter (oder gekaperter) CardDAV-/GitHub-Server könnte uns per
+ * `Location: http://169.254.169.254/…` oder `http://10.0.0.5/…` samt
+ * Authorization-/Basic-Header auf ein internes Ziel lenken. Deshalb
+ * `redirect: 'manual'`: jeder Hop läuft erneut durch assertSafeTarget und muss
+ * außerdem auf derselben Origin liegen wie `base` (bzw. die Startadresse) –
+ * fremde Origins wollen wir mit Zugangsdaten gar nicht erst ansprechen, auch
+ * wenn fetch bei Cross-Origin den Authorization-Header strippen würde.
+ *
+ * Methodenwechsel wie im Fetch-Standard: 303 wird zu GET (außer HEAD), 301/302
+ * nur nach POST; PROPFIND/REPORT & Co. behalten Methode und Body (CardDAV-
+ * Server schicken gern ein 301 auf die Variante mit Schrägstrich am Ende).
+ * Gibt die letzte Response zurück; mehr als `maxRedirects` Hops sind ein Fehler.
+ */
+export async function guardedFetch(url, init = {}, { base = null, purpose = '', allowPrivate, allowHttp, maxRedirects = 3 } = {}) {
+  const guard = { purpose, allowPrivate, allowHttp };
+  const label = purpose ? `${purpose}-Adresse` : 'Adresse';
+  let current = String(url);
+  let opts = { ...init, redirect: 'manual' };
+
+  for (let hop = 0; ; hop++) {
+    await assertSafeTarget(current, guard);
+    const res = await fetch(current, opts);
+    const location = res.headers.get('location');
+    if (!REDIRECT_STATUS.has(res.status) || !location) return res;
+
+    // Body der Zwischenantwort freigeben, sonst bleibt die Verbindung belegt.
+    try { await res.body?.cancel(); } catch { /* egal */ }
+
+    if (hop >= maxRedirects) {
+      throw new Error(`Zu viele Weiterleitungen (${label} ${url}, mehr als ${maxRedirects})`);
+    }
+    let next;
+    try { next = new URL(location, current); }
+    catch { throw new Error(`Ungültige Weiterleitung von ${label} ${current}: ${location}`); }
+    assertSameOrigin(next, base || url);
+
+    const method = String(opts.method || 'GET').toUpperCase();
+    const toGet = (res.status === 303 && method !== 'HEAD')
+      || ((res.status === 301 || res.status === 302) && method === 'POST');
+    if (toGet) {
+      // Ohne Body dürfen auch die Body-Header nicht mitgehen.
+      const headers = new Headers(opts.headers);
+      for (const h of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) headers.delete(h);
+      opts = { ...opts, method: 'GET', body: undefined, headers };
+    }
+    current = next.toString();
+  }
+}

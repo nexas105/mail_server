@@ -17,7 +17,9 @@ services:
     env_file: .env
     environment:
       BIND_HOST: 0.0.0.0
-      MAIL_TRUST_PROXY: "1"
+      # Anzahl vertrauenswürdiger Proxys vor dem Backend (X-Forwarded-For):
+      # 1 = nur nginx davor; 2 = zusätzlich ein TLS-Reverse-Proxy vor nginx.
+      MAIL_TRUST_PROXY: "${MAIL_TRUST_PROXY:-1}"
       MAIL_DATA_DIR: /data
       # Healthcheck und MCP-Container erreichen den Server unter diesen Namen,
       # unabhängig von MAIL_ALLOWED_HOSTS.

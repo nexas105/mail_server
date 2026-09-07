@@ -103,8 +103,8 @@ function reportText(parsed = {}) {
 
 /**
  * Zerlegt eine Bounce-Meldung.
- * Gibt { email, code, type, reason, messageId, relayRecipientId, relayDraftId,
- * structured } zurück – Felder, die sich nicht sicher bestimmen lassen, bleiben
+ * Gibt { email, code, type, reason, messageId, relayRefs, relayRecipientId,
+ * relayDraftId, structured } zurück – Felder, die sich nicht sicher bestimmen lassen, bleiben
  * null. Lieber unvollständig als geraten: Das Ergebnis markiert einen Empfänger
  * als unzustellbar. `structured` sagt, ob ein echter Zustellbericht vorliegt;
  * ohne den ist `email` nur ein Fund im Fließtext und kein Beleg.
@@ -127,7 +127,18 @@ export function parseBounce(parsed = {}) {
   const messageId = (body.match(/^[ \t]*(?:Original-)?Message-(?:ID|Id):\s*<([^>]+)>/mi) || [])[1] || null;
 
   // Unsere eigenen Kopfzeilen aus der zitierten Originalmail (message/rfc822-Teil).
-  // Sie benennen den Empfänger-Datensatz direkt – die verlässlichste Zuordnung.
+  // X-Relay-Ref ist der Beleg: 128 Bit Zufall je Empfänger, nur wer die
+  // Originalmail hat, kennt ihn. Mehrere Referenzen (Sammelmail) stehen durch
+  // Komma getrennt, ggf. über gefaltete Folgezeilen.
+  const relayRefs = [];
+  for (const m of body.matchAll(/^[ \t]*X-Relay-Ref:[ \t]*(.+(?:\n[ \t]+.+)*)/gmi)) {
+    for (const ref of m[1].match(/[A-Za-z0-9_-]{16,}/g) || []) {
+      if (!relayRefs.includes(ref)) relayRefs.push(ref);
+    }
+    if (relayRefs.length >= 500) break;
+  }
+  // X-Relay-Recipient ist fortlaufend und damit erratbar – nur noch zur
+  // Information, nicht mehr als Nachweis (siehe imap.js noteBounce).
   const relayRecipientId = (body.match(/^[ \t]*X-Relay-Recipient:[ \t]*(\d+)[ \t\r]*$/mi) || [])[1] || null;
   const relayDraftId = (body.match(/^[ \t]*X-Relay-Draft:[ \t]*(\d+)[ \t\r]*$/mi) || [])[1] || null;
 
@@ -155,6 +166,7 @@ export function parseBounce(parsed = {}) {
       || String(parsed.subject || '').slice(0, 200)
       || null,
     messageId,
+    relayRefs,
     relayRecipientId: relayRecipientId ? Number(relayRecipientId) : null,
     relayDraftId: relayDraftId ? Number(relayDraftId) : null,
     structured: hasDeliveryReport(parsed),

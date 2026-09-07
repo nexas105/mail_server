@@ -1,7 +1,8 @@
-import { forwardRef, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { Editor } from '@tinymce/tinymce-react';
 import type { Editor as TinyMCEEditor } from 'tinymce';
 import { Icon } from './Icon';
+import { sanitizeEmailHtml } from '../lib/sanitizeHtml';
 
 // TinyMCE self-hosted (GPL) — alles lokal gebündelt, kein Cloud-Key nötig.
 import 'tinymce/tinymce';
@@ -33,12 +34,16 @@ export const HtmlEditor = forwardRef<HtmlEditorHandle, {
   const [mode, setMode] = useState<'visual' | 'code'>('visual');
   const taRef = useRef<HTMLTextAreaElement>(null);
   const editorRef = useRef<TinyMCEEditor | null>(null);
+  // Der Editor-DOM ist same-origin und nicht sandboxed – gespeichertes HTML
+  // (Vorlagen/Entwürfe, auch von anderen Nutzern oder MCP-Clients) wird deshalb
+  // vor dem Rendern bereinigt. Liefert bei sauberem Input dieselbe Instanz zurück.
+  const safeValue = useMemo(() => sanitizeEmailHtml(value), [value]);
 
   useImperativeHandle(ref, () => ({
     insert(snippet: string) {
       if (mode === 'visual' && editorRef.current) {
         editorRef.current.focus();
-        editorRef.current.insertContent(snippet);
+        editorRef.current.insertContent(sanitizeEmailHtml(snippet));
       } else {
         const el = taRef.current;
         const start = el?.selectionStart ?? value.length;
@@ -66,8 +71,8 @@ export const HtmlEditor = forwardRef<HtmlEditorHandle, {
       {mode === 'visual' ? (
         <Editor
           licenseKey="gpl"
-          value={value}
-          onEditorChange={v => onChange(v)}
+          value={safeValue}
+          onEditorChange={v => onChange(sanitizeEmailHtml(v))}
           onInit={(_evt, editor) => { editorRef.current = editor; }}
           init={{
             height: Math.max(320, rows * 26),
@@ -80,10 +85,12 @@ export const HtmlEditor = forwardRef<HtmlEditorHandle, {
             toolbar: 'undo redo | blocks | bold italic underline forecolor backcolor | alignleft aligncenter alignright | bullist numlist | link image table | removeformat',
             toolbar_mode: 'wrap' as const,
             placeholder,
-            // E-Mail-HTML unangetastet lassen:
+            // E-Mail-HTML unangetastet lassen (verify_html:false wäre in TinyMCE 8
+            // nur ein Alias für genau dieses valid_elements und ist deshalb weg):
             valid_elements: '*[*]',
             valid_children: '+body[style]',
-            verify_html: false,
+            // Zweite Linie neben sanitizeEmailHtml – aktive Inhalte nie in den Editor-DOM.
+            invalid_elements: 'script,iframe,object,embed,applet,svg,math,base,meta,link,template',
             convert_urls: false,
             entity_encoding: 'raw' as const,
             forced_root_block: 'p',
