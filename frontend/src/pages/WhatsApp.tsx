@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../lib/api';
 import { toast } from '../lib/toast';
 import { relTime, fullDateTime } from '../lib/dates';
@@ -71,7 +71,9 @@ export function WhatsApp() {
 
 function ChatsTab({ accountId, connected }: { accountId: number | null; connected: boolean }) {
   const [chats, setChats] = useState<WaChat[] | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
+  // ?chat=<id> öffnet einen Chat direkt – so verlinken andere Seiten hierher.
+  const [params] = useSearchParams();
+  const [selected, setSelected] = useState<number | null>(params.get('chat') ? +params.get('chat')! : null);
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState<'all' | 'unread' | 'groups'>('all');
 

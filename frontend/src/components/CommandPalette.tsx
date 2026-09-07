@@ -68,6 +68,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       { id: 'nav-brands', icon: 'sparkle', title: 'Marken', section: 'Navigation', keywords: 'brand farbe corporate identity preset', run: () => go(ROUTES.manage.brands) },
       { id: 'nav-accounts', icon: 'server', title: 'E-Mail-Konten', section: 'Navigation', keywords: 'smtp imap carddav accounts', run: () => go(ROUTES.manage.accounts) },
       { id: 'nav-whatsapp', icon: 'chat', title: 'WhatsApp-Chats', section: 'Navigation', keywords: 'whatsapp wa nachrichten chat', run: () => go(ROUTES.whatsapp.chats) },
+      { id: 'nav-wa-scheduled', icon: 'clock', title: 'Geplante WhatsApp-Nachrichten', section: 'Navigation', keywords: 'whatsapp geplant später senden zeitplan timer', run: () => go(ROUTES.whatsapp.scheduled) },
       { id: 'nav-wa-connect', icon: 'smartphone', title: 'WhatsApp-Verbindung', section: 'Navigation', keywords: 'whatsapp koppeln qr pairing verbinden', run: () => go(ROUTES.whatsapp.connect) },
       { id: 'nav-settings', icon: 'settings', title: 'Einstellungen', section: 'Navigation', keywords: 'github token einstellungen konfiguration', run: () => go(ROUTES.settings) },
       { id: 'nav-guide', icon: 'book', title: 'Anleitung', section: 'Navigation', keywords: 'mcp hilfe setup', run: () => go(ROUTES.guide) },

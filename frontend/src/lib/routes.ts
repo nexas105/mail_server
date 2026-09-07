@@ -13,6 +13,7 @@ export const ROUTES = {
     chats: '/whatsapp',
     connect: '/whatsapp/verbindung',
     contacts: '/whatsapp/kontakte',
+    scheduled: '/whatsapp/geplant',
   },
   manage: {
     contacts: '/verwaltung/kontakte',

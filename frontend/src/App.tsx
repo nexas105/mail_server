@@ -21,6 +21,7 @@ import { Profile } from './pages/Profile';
 import { WhatsApp } from './pages/WhatsApp';
 import { WhatsAppConnect } from './pages/WhatsAppConnect';
 import { WhatsAppContacts } from './pages/WhatsAppContacts';
+import { WhatsAppScheduled } from './pages/WhatsAppScheduled';
 import { Dashboard } from './pages/Dashboard';
 import { LEGACY_ROUTES, ROUTES } from './lib/routes';
 
@@ -84,6 +85,7 @@ function Shell({ user, onSignedOut }: { user: AuthState['user']; onSignedOut: ()
           <Route path={ROUTES.whatsapp.chats} element={<WhatsApp />} />
           <Route path={ROUTES.whatsapp.connect} element={<WhatsAppConnect />} />
           <Route path={ROUTES.whatsapp.contacts} element={<WhatsAppContacts />} />
+          <Route path={ROUTES.whatsapp.scheduled} element={<WhatsAppScheduled />} />
           <Route path={ROUTES.profile} element={<Profile />} />
           <Route path={ROUTES.settings} element={<Settings />} />
           <Route path={ROUTES.guide} element={<Guide />} />

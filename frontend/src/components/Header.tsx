@@ -39,6 +39,7 @@ const WORKSPACES: {
     key: 'wa', label: 'WhatsApp', icon: 'chat', badge: 'wa',
     items: [
       { to: ROUTES.whatsapp.chats, end: true, icon: 'chat', label: 'Chats', badge: 'wa' },
+      { to: ROUTES.whatsapp.scheduled, icon: 'clock', label: 'Geplant' },
       { to: ROUTES.whatsapp.connect, icon: 'smartphone', label: 'Verbindung' },
       { to: ROUTES.whatsapp.contacts, icon: 'users', label: 'WhatsApp-Kontakte' },
     ],
