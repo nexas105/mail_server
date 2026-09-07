@@ -26,6 +26,7 @@ import * as wa from './whatsapp.js';
 import { subscribe, ping as waPing, closeAllStreams, emit as waEmit } from './wa-bus.js';
 import { ROOT_DIR, STATIC_DIR, DATA_DIR } from './paths.js';
 import * as backup from './backup.js';
+import { transcriberStatus } from './transcribe.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1240,6 +1241,13 @@ app.get('/api/whatsapp/messages/:id/media', wrap(async (req, res) => {
 }));
 app.post('/api/whatsapp/messages/:id/download-media', wrap(async (req, res) =>
   res.json(await wa.downloadMessageMedia(+req.params.id))));
+// Sprachnachricht in Text – sofort, auch wenn die automatische Warteschlange
+// sie noch nicht dran hatte. Antwortet mit der aktualisierten Nachricht.
+app.post('/api/whatsapp/messages/:id/transcribe', wrap(async (req, res) => {
+  try { res.json(await wa.transcribeMessage(+req.params.id)); }
+  catch (e) { res.status(e.status || 400).json({ error: e.message, message: e.row || null }); }
+}));
+app.get('/api/whatsapp/transcription', wrap(async (req, res) => res.json(await transcriberStatus())));
 
 app.get('/api/whatsapp/unread-count', wrap((req, res) =>
   res.json({ unread: db.waUnreadCount(req.query.account_id ? +req.query.account_id : null) })));
@@ -1381,6 +1389,7 @@ setInterval(() => { try { auth.purgeExpired(); } catch { /* egal */ } }, 3600_00
 // Gekoppelte WhatsApp-Konten wieder verbinden (WA_AUTOSTART=0 schaltet das ab).
 wa.autostart().catch(e => console.error('[whatsapp] Autostart:', e.message));
 wa.startMediaCleanup();
+wa.startTranscriptionBacklog();
 // Hält den Stream und Zwischenstationen wach.
 setInterval(waPing, 25000).unref();
 

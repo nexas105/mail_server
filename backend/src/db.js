@@ -1895,9 +1895,47 @@ export function setWaChatOldest(id, ts) {
   db.prepare('UPDATE wa_chats SET oldest_synced_ts=? WHERE id=?').run(ts, id);
 }
 
+// Transkript für Sprachnachrichten – nachgerüstete Spalten.
+{
+  const cols = db.prepare('PRAGMA table_info(wa_messages)').all().map(c => c.name);
+  if (!cols.includes('transcript')) db.exec('ALTER TABLE wa_messages ADD COLUMN transcript TEXT');
+  if (!cols.includes('transcript_status')) db.exec('ALTER TABLE wa_messages ADD COLUMN transcript_status TEXT');
+  if (!cols.includes('transcript_error')) db.exec('ALTER TABLE wa_messages ADD COLUMN transcript_error TEXT');
+}
+
 const WA_MSG_LIST_COLS = `id, wa_account_id, chat_id, wa_id, chat_jid, sender_jid, sender_name,
   from_me, ts, type, snippet, quoted_wa_id, media_mime, media_size, media_filename,
-  stored_path IS NOT NULL AS media_downloaded, status, origin, created_at`;
+  stored_path IS NOT NULL AS media_downloaded, status, origin, created_at,
+  transcript, transcript_status, transcript_error`;
+
+/**
+ * Transkript einer Sprachnachricht setzen. Bei Erfolg wandert der Text auch in
+ * body (Suche, MCP, Sprechblase) und in den Listen-Ausschnitt – die Nachricht
+ * bleibt vom Typ audio, der Abspieler bleibt.
+ */
+export function setWaTranscript(id, { status, text = null, error = null }) {
+  const m = db.prepare('SELECT * FROM wa_messages WHERE id=?').get(id);
+  if (!m) return null;
+  if (status === 'done') {
+    const t = String(text || '').trim();
+    const snippet = '🎤 ' + (t.length > 90 ? t.slice(0, 89) + '…' : t);
+    db.prepare(`UPDATE wa_messages SET transcript=?, transcript_status='done', transcript_error=NULL,
+                body=?, snippet=? WHERE id=?`).run(t, t, snippet, id);
+    // Ist das die jüngste Nachricht im Chat, zeigt die Chatliste jetzt den Text.
+    db.prepare(`UPDATE wa_chats SET last_snippet=? WHERE id=? AND COALESCE(last_message_ts,0) <= ?`)
+      .run(snippet, m.chat_id, m.ts);
+  } else {
+    db.prepare('UPDATE wa_messages SET transcript_status=?, transcript_error=? WHERE id=?').run(status, error, id);
+  }
+  return getWaMessage(id);
+}
+/** Sprachnachrichten mit Datei, aber ohne Transkript – für Warteschlange und Nachholen. */
+export function waAudioToTranscribe({ sinceTs = 0, limit = 200 } = {}) {
+  return db.prepare(
+    `SELECT id FROM wa_messages
+     WHERE type='audio' AND stored_path IS NOT NULL AND transcript_status IS NULL AND ts >= ?
+     ORDER BY ts DESC LIMIT ?`).all(sinceTs, limit).map(r => r.id);
+}
 
 /** Ein Batch Nachrichten. Gibt zurück, wie viele wirklich neu waren. */
 export function insertWaMessages(rows = []) {

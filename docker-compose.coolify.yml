@@ -45,6 +45,13 @@ services:
       - MAIL_IMAP_ALLOW_SELF_SIGNED=${MAIL_IMAP_ALLOW_SELF_SIGNED:-0}
       - WA_AUTOSTART=${WA_AUTOSTART:-1}
       - MAIL_WA_MCP_SEND=${MAIL_WA_MCP_SEND:-0}
+      # Sprachnachrichten → Text über den Dienst „whisper" unten (OpenAI-kompatibel).
+      # Leer lassen, um die Transkription abzuschalten; oder auf https://api.openai.com/v1
+      # mit MAIL_TRANSCRIBE_KEY und MAIL_TRANSCRIBE_MODEL=whisper-1 zeigen.
+      - MAIL_TRANSCRIBE_URL=${MAIL_TRANSCRIBE_URL:-http://whisper:8000/v1}
+      - MAIL_TRANSCRIBE_KEY=${MAIL_TRANSCRIBE_KEY:-}
+      - MAIL_TRANSCRIBE_MODEL=${MAIL_TRANSCRIBE_MODEL:-Systran/faster-whisper-small}
+      - MAIL_TRANSCRIBE_LANG=${MAIL_TRANSCRIBE_LANG:-de}
     volumes:
       - mail-data:/data
     restart: unless-stopped
@@ -114,5 +121,30 @@ services:
       start_period: 15s
       retries: 3
 
+  # Whisper für Sprachnachrichten: speaches (faster-whisper) mit OpenAI-kompatibler
+  # API, nur intern erreichbar. Das Modell lädt der Backend beim Start nach
+  # (POST /v1/models/<id>) und liegt danach im Volume whisper-cache.
+  # CPU-Betrieb, int8: „small" braucht ~1 GB RAM und schafft eine Sprachnachricht
+  # in wenigen Sekunden; nach 5 Minuten Ruhe wird das Modell entladen.
+  whisper:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    expose:
+      - "8000"
+    environment:
+      - WHISPER__INFERENCE_DEVICE=cpu
+      - WHISPER__COMPUTE_TYPE=int8
+      - STT_MODEL_TTL=300
+      - ENABLE_UI=false
+    volumes:
+      - whisper-cache:/home/ubuntu/.cache/huggingface/hub
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
 volumes:
   mail-data: {}
+  whisper-cache: {}

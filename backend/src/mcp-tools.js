@@ -1146,6 +1146,20 @@ tool(
 );
 
 tool(
+  'transcribe_wa_message',
+  'Sprachnachricht in Text (Whisper). Läuft automatisch für neue Sprachnachrichten, wenn ein '
+  + 'Transkriptions-Dienst konfiguriert ist; hiermit lässt sich eine einzelne sofort nachholen. '
+  + 'Der Text steht danach in text/body der Nachricht.',
+  { message_id: z.number().int() },
+  async ({ message_id }) => {
+    try {
+      const m = await ui(`/api/whatsapp/messages/${message_id}/transcribe`, { method: 'POST', timeoutMs: 6 * 60_000 });
+      return ok({ message_id: m.id, status: m.transcript_status, text: m.transcript, error: m.transcript_error || null });
+    } catch (e) { return ok({ error: e.message }); }
+  },
+);
+
+tool(
   'mark_wa_chat_read',
   'Setzt einen Chat auf gelesen und schickt Lesebestätigungen.',
   { chat_id: z.number().int() },

@@ -382,6 +382,8 @@ nicht auf.
 | `sync_inbox` / `list_inbox` / `get_message` | Posteingang per IMAP abrufen & lesen |
 | `send_wa_message` / `schedule_wa_message` | WhatsApp sofort senden bzw. für einen Zeitpunkt einplanen (nur mit `MAIL_WA_MCP_SEND=1`) |
 | `list_wa_scheduled` / `cancel_wa_scheduled` | Geplante WhatsApp-Nachrichten einsehen und zurückziehen |
+| `merge_wa_chats` | Doppelten Chat (@lid-Kennung) in den Nummern-Chat auflösen |
+| `transcribe_wa_message` | Sprachnachricht per Whisper in Text (läuft für neue automatisch) |
 
 Die vollständige, immer aktuelle Liste steht in der Web-UI unter **Anleitung** –
 sie liest sie über `GET /api/mcp/tools` direkt aus dem laufenden Server.
@@ -545,6 +547,20 @@ Entwurf lässt sich das im Schritt „Senden" abweichend schalten.
 Der Pixel-Endpunkt `/api/t/o/<token>.gif` ist bewusst ohne Anmeldung
 erreichbar — er wird vom Mail-Programm des Empfängers geladen. Er antwortet
 immer mit dem GIF, auch bei unbekanntem Token, und verrät damit nichts.
+
+## Sprachnachrichten in Text (Whisper)
+
+Eingehende WhatsApp-Sprachnachrichten werden automatisch transkribiert, sobald
+`MAIL_TRANSCRIBE_URL` auf einen OpenAI-kompatiblen Dienst zeigt. Im Compose
+ist dafür der Dienst `whisper` enthalten ([speaches](https://github.com/speaches-ai/speaches)
+mit faster-whisper, CPU, int8). Das Modell (`MAIL_TRANSCRIBE_MODEL`, Standard
+`Systran/faster-whisper-small`) fordert das Backend beim Start beim Dienst an;
+der erste Start lädt es aus dem Hugging-Face-Hub. Der Text landet in der
+Sprechblase unter dem Abspieler, in der Chatliste, in der Suche und bei MCP in
+`text`. Sprachnachrichten der letzten 30 Tage werden beim Start nachgeholt;
+einzelne per Knopf **In Text** oder `transcribe_wa_message`. Alternativ
+`MAIL_TRANSCRIBE_URL=https://api.openai.com/v1` mit `MAIL_TRANSCRIBE_KEY` und
+`MAIL_TRANSCRIBE_MODEL=whisper-1`.
 
 ## Sicherung & Umzug
 

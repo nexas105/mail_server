@@ -18,6 +18,7 @@ import makeWASocket, {
 import pino from 'pino';
 import qrcode from 'qrcode-generator';
 import * as db from './db.js';
+import { transcribeFile, transcriptionEnabled, ensureModel } from './transcribe.js';
 import { emit } from './wa-bus.js';
 import { DATA_DIR } from './paths.js';
 
@@ -349,13 +350,93 @@ const WANTED = {
 async function maybeDownloadMedia(session, row, dbId) {
   if (!row.media_mime || !row._msg) return;
   const acc = db.getWaAccount(session.id);
-  const wanted = WANTED[acc?.media_download || 'images_audio'] || WANTED.images_audio;
+  const wanted = [...(WANTED[acc?.media_download || 'images_audio'] || WANTED.images_audio)];
+  // Wer transkribiert, braucht die Sprachnachricht – unabhängig von der Medien-Einstellung.
+  if (transcriptionEnabled() && !wanted.includes('audio')) wanted.push('audio');
   if (!wanted.includes(row.type)) return;
   const maxBytes = (acc?.media_max_mb || 5) * 1024 * 1024;
   if (row.media_size && row.media_size > maxBytes) return;
   try {
     await downloadMediaToDisk(session, dbId, row._msg);
+    if (row.type === 'audio') enqueueTranscription(dbId);
   } catch (e) { log('Medien-Download fehlgeschlagen:', e.message); }
+}
+
+/* ---------------------------------------------------------- Transkription */
+// Eine Warteschlange, eine Datei nach der anderen: der Whisper-Dienst ist
+// CPU-gebunden, parallele Anfragen machen ihn nur langsamer.
+const transcribeQueue = [];
+const queued = new Set();
+let transcribing = false;
+
+export function enqueueTranscription(messageId, { front = false } = {}) {
+  if (!transcriptionEnabled() || queued.has(messageId)) return false;
+  queued.add(messageId);
+  if (front) transcribeQueue.unshift(messageId); else transcribeQueue.push(messageId);
+  runTranscriptions().catch(e => log('Transkription:', e.message));
+  return true;
+}
+
+async function runTranscriptions() {
+  if (transcribing) return;
+  transcribing = true;
+  try {
+    while (transcribeQueue.length) {
+      const id = transcribeQueue.shift();
+      queued.delete(id);
+      await transcribeOne(id).catch(e => log(`Transkription #${id}:`, e.message));
+    }
+  } finally { transcribing = false; }
+}
+
+async function transcribeOne(messageId) {
+  const m = db.getWaMessage(messageId);
+  if (!m || m.type !== 'audio' || !m.stored_path || !fs.existsSync(m.stored_path)) return null;
+  if (m.transcript_status === 'done') return m;
+  db.setWaTranscript(messageId, { status: 'pending' });
+  emit('message', { ...db.getWaChat(m.chat_id), message: db.getWaMessageByWaId(m.wa_account_id, m.chat_jid, m.wa_id) });
+  try {
+    const text = await transcribeFile(m.stored_path, m.media_mime || 'audio/ogg');
+    const done = db.setWaTranscript(messageId, { status: 'done', text: text || '(nichts zu hören)' });
+    const chat = db.getWaChat(m.chat_id);
+    emit('message', { ...chat, message: db.getWaMessageByWaId(m.wa_account_id, m.chat_jid, m.wa_id) });
+    emit('chat', chat);
+    return done;
+  } catch (e) {
+    const failed = db.setWaTranscript(messageId, { status: 'failed', error: e.message });
+    emit('message', { ...db.getWaChat(m.chat_id), message: db.getWaMessageByWaId(m.wa_account_id, m.chat_jid, m.wa_id) });
+    throw Object.assign(e, { row: failed });
+  }
+}
+
+/** Sofort transkribieren (Knopf in der Oberfläche, MCP). Lädt die Datei bei Bedarf. */
+export async function transcribeMessage(messageId) {
+  if (!transcriptionEnabled()) throw new Error('Transkription nicht konfiguriert (MAIL_TRANSCRIBE_URL fehlt)');
+  let m = db.getWaMessage(messageId);
+  if (!m) throw new Error('Nachricht nicht gefunden');
+  if (m.type !== 'audio') throw new Error('Nur Sprachnachrichten lassen sich transkribieren');
+  if (!m.stored_path || !fs.existsSync(m.stored_path)) m = await downloadMessageMedia(messageId);
+  // Läuft sie schon in der Warteschlange, einfach abwarten.
+  if (queued.has(messageId)) {
+    while (queued.has(messageId) || (transcribing && db.getWaMessage(messageId)?.transcript_status === 'pending')) await sleep(500);
+    return db.getWaMessage(messageId);
+  }
+  return transcribeOne(messageId);
+}
+
+/**
+ * Beim Start: Modell beim Dienst anfordern und liegengebliebene
+ * Sprachnachrichten der letzten 30 Tage nachholen.
+ */
+export function startTranscriptionBacklog() {
+  if (!transcriptionEnabled()) return;
+  setTimeout(async () => {
+    const r = await ensureModel();
+    if (!r.ok) log('Transkriptions-Dienst noch nicht bereit:', r.reason || r.status);
+    const ids = db.waAudioToTranscribe({ sinceTs: nowSec() - 30 * 86400, limit: 300 });
+    for (const id of ids) enqueueTranscription(id);
+    if (ids.length) log(`Transkription: ${ids.length} Sprachnachrichten nachzuholen`);
+  }, 30_000).unref();
 }
 
 /**
@@ -432,6 +513,11 @@ export async function downloadMessageMedia(messageId) {
   const row = db.getWaMessage(messageId);
   if (!row) throw new Error('Nachricht nicht gefunden');
   if (row.stored_path && fs.existsSync(row.stored_path)) return row;
+  const out = await downloadMessageMediaInner(row, messageId);
+  if (row.type === 'audio' && !row.transcript_status) enqueueTranscription(messageId);
+  return out;
+}
+async function downloadMessageMediaInner(row, messageId) {
   if (!row.media_mime) throw new Error('Diese Nachricht hat keine Medien');
 
   const session = sessions.get(row.wa_account_id);

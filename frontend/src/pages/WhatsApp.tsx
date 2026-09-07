@@ -226,7 +226,10 @@ function Thread({ chatId, connected, chats, onMerged }: {
 
   useEffect(() => onWaEvent((event, data) => {
     if (event === 'message' && data?.message?.chat_id === chatId) {
-      setMsgs(ms => (ms || []).some(m => m.id === data.message.id) ? ms : [...(ms || []), data.message]);
+      // Kommt dieselbe Nachricht erneut (Transkript fertig, Status), an Ort und Stelle ersetzen.
+      setMsgs(ms => (ms || []).some(m => m.id === data.message.id)
+        ? (ms || []).map(m => m.id === data.message.id ? { ...m, ...data.message } : m)
+        : [...(ms || []), data.message]);
     }
     if (event === 'scheduled' && data?.chat_id === chatId && data.item) {
       setScheduled(list => {
@@ -659,6 +662,7 @@ function Bubble({ m, isGroup, onReact }: {
     <div className={'wa-bubble' + (m.from_me ? ' me' : '')}>
       {isGroup && !m.from_me && m.sender_name && <div className="wa-sender">{m.sender_name}</div>}
       {isMedia && <Media m={m} />}
+      {m.type === 'audio' && <Transcript m={m} />}
       {m.body && <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{m.body}</div>}
       {!m.body && !isMedia && <div className="muted small">{m.snippet || m.type}</div>}
       <div className="meta">
@@ -681,6 +685,36 @@ function Bubble({ m, isGroup, onReact }: {
   );
 }
 
+
+/**
+ * Transkript-Zeile unter dem Abspieler. Der Text selbst steht in body und wird
+ * von der Sprechblase gerendert – hier nur Zustand und der Knopf zum Nachholen.
+ */
+function Transcript({ m }: { m: WaMessage }) {
+  const [busy, setBusy] = useState(false);
+  if (m.transcript_status === 'done') return null;
+  if (m.transcript_status === 'pending' || busy) {
+    return <div className="muted small" style={{ marginBottom: 4 }}>Wird transkribiert …</div>;
+  }
+  async function go() {
+    setBusy(true);
+    try {
+      await api(`/whatsapp/messages/${m.id}/transcribe`, { method: 'POST' });
+      // Die Aktualisierung kommt über den Live-Stream (message-Ereignis).
+    } catch (e) { toast((e as Error).message, 'err'); }
+    setBusy(false);
+  }
+  return (
+    <div className="small" style={{ marginBottom: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+      {m.transcript_status === 'failed' && (
+        <span className="muted" title={m.transcript_error || undefined}>Transkription fehlgeschlagen</span>
+      )}
+      <button className="btn ghost sm" onClick={go} title="Sprachnachricht in Text umwandeln (Whisper)">
+        <Icon name="sparkle" size={12} /> {m.transcript_status === 'failed' ? 'Nochmal' : 'In Text'}
+      </button>
+    </div>
+  );
+}
 
 /**
  * Medien in der Sprechblase. Sprachnachrichten sind mit Abstand der häufigste

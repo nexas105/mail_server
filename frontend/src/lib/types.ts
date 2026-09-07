@@ -325,6 +325,10 @@ export interface WaMessage {
   status: string | null;
   origin: string | null;
   reactions?: WaReaction[];
+  /** Sprachnachrichten: Text aus Whisper, sobald vorhanden. */
+  transcript?: string | null;
+  transcript_status?: 'pending' | 'done' | 'failed' | null;
+  transcript_error?: string | null;
 }
 
 /** Geplante Nachricht – ein Auftrag, den der Server zur Sendezeit ausführt. */

@@ -70,5 +70,21 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Optional: Whisper für Sprachnachrichten (speaches, OpenAI-kompatibel). Start mit
+  #   docker compose --profile whisper up -d
+  # und in .env MAIL_TRANSCRIBE_URL=http://whisper:8000/v1 setzen.
+  whisper:
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    profiles: [whisper]
+    environment:
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
+      STT_MODEL_TTL: "300"
+      ENABLE_UI: "false"
+    volumes:
+      - whisper-cache:/home/ubuntu/.cache/huggingface/hub
+    restart: unless-stopped
+
 volumes:
+  whisper-cache: {}
   mail-data: {}
