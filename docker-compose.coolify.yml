@@ -97,6 +97,8 @@ services:
       - MAIL_CRYPTO_KEY=${SERVICE_HEX_64_CRYPTO}
       # Der MCP-Prozess spricht den Web-Server intern an (WhatsApp-Socket lebt nur dort).
       - MAIL_UI_URL=http://backend:3000
+      # Öffentliche Adresse für Links in Tool-Antworten (open_in_ui).
+      - MAIL_PUBLIC_URL=${SERVICE_URL_FRONTEND}
       - MAIL_WA_MCP_SEND=${MAIL_WA_MCP_SEND:-0}
       - WA_AUTOSTART=0
     volumes:

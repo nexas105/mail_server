@@ -77,11 +77,15 @@ export function createMcpServer(ctx = {}) {
   };
 
 
+// UI: interne Adresse des Web-Servers (WhatsApp-Socket, Service-Aufrufe). Im
+// Container ist das http://backend:3000 – für Links an den Nutzer unbrauchbar.
+// LINK: öffentliche Adresse für open_in_ui & Co.; fällt auf UI zurück.
 const UI = process.env.MAIL_UI_URL || `http://localhost:${process.env.PORT || 3000}`;
+const LINK = String(process.env.MAIL_PUBLIC_URL || UI).replace(/\/+$/, '');
 const server = new McpServer({ name: 'mail-server', version: '1.0.0' });
 
 const ok = obj => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] });
-const draftLink = id => `${UI}/draft/${id}`;
+const draftLink = id => `${LINK}/draft/${id}`;
 
 const recipientSchema = z.object({
   email: z.string().email(),
@@ -387,11 +391,11 @@ tool(
 tool('list_assets', 'Bilder/Logos der Medien-Bibliothek (id, filename, mimetype, size).', {}, async () => ok(db.listAssets()));
 tool(
   'add_asset',
-  'Lädt ein Bild/Logo hoch (base64). In HTML per <img src="' + UI + '/api/assets/<id>/file"> einbinden – beim Versand wird es automatisch zum Inline-Anhang (kommt beim Empfänger an).',
+  'Lädt ein Bild/Logo hoch (base64). In HTML per <img src="' + LINK + '/api/assets/<id>/file"> einbinden – beim Versand wird es automatisch zum Inline-Anhang (kommt beim Empfänger an).',
   { filename: z.string(), mimetype: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml']), base64: z.string() },
   async (a) => {
     const asset = db.addAsset(a);
-    return ok({ id: asset.id, filename: asset.filename, url: `${UI}/api/assets/${asset.id}/file` });
+    return ok({ id: asset.id, filename: asset.filename, url: `${LINK}/api/assets/${asset.id}/file` });
   },
 );
 
@@ -650,7 +654,7 @@ tool(
     if (!account.imap_host) return ok({ error: 'Kein IMAP-Host konfiguriert' });
     // bounced: dabei erkannte Unzustellbarkeitsmeldungen, die einem Versand zugeordnet wurden.
     const result = await fetchInbox(account, { folder, limit });
-    return ok({ ...result, folder, inbox_link: `${UI}/inbox` });
+    return ok({ ...result, folder, inbox_link: `${LINK}/inbox` });
   },
 );
 tool(
@@ -727,7 +731,7 @@ tool(
       description: r.description,
       role: r.role,
       html_url: r.html_url,
-      open_in_ui: `${UI}/contacts`,
+      open_in_ui: `${LINK}/contacts`,
     })));
   },
 );
@@ -853,7 +857,7 @@ tool(
     if (!conn) throw new Error('Keine GitHub-Verbindung hinterlegt – in den Einstellungen der Web-UI anlegen.');
     const meta = await gh.getRepo(db.getGithubToken(conn), { owner, repo: name });
     const row = db.addContactRepo(contact.id, { ...meta, connection_id: conn.id, role });
-    return ok({ link_id: row.id, repo: row.full_name, contact: contact.email, open_in_ui: `${UI}/contacts` });
+    return ok({ link_id: row.id, repo: row.full_name, contact: contact.email, open_in_ui: `${LINK}/contacts` });
   },
 );
 
@@ -929,7 +933,7 @@ tool(
         last_message_at: c.last_message_ts ? new Date(c.last_message_ts * 1000).toISOString() : null,
         last_snippet: c.last_snippet,
         linked_contact_email: c.contact_email || null,
-        open_in_ui: `${UI}/whatsapp`,
+        open_in_ui: `${LINK}/whatsapp`,
       }))),
 );
 
@@ -956,7 +960,7 @@ tool(
       note: c.is_group && !c.meta_synced_at
         ? 'Teilnehmer noch nicht abgefragt – das passiert automatisch beim nächsten Empfang in dieser Gruppe.'
         : undefined,
-      open_in_ui: `${UI}/whatsapp`,
+      open_in_ui: `${LINK}/whatsapp`,
     });
   },
 );
@@ -987,7 +991,7 @@ tool(
         status: m.status,
         origin: m.origin,
       })),
-      open_in_ui: `${UI}/whatsapp`,
+      open_in_ui: `${LINK}/whatsapp`,
     });
   },
 );
@@ -1000,7 +1004,7 @@ tool(
     const m = db.getWaMessage(id);
     if (!m) return ok({ error: 'Nachricht nicht gefunden' });
     const { raw, ...rest } = m;
-    return ok({ ...rest, at: new Date(m.ts * 1000).toISOString(), open_in_ui: `${UI}/whatsapp` });
+    return ok({ ...rest, at: new Date(m.ts * 1000).toISOString(), open_in_ui: `${LINK}/whatsapp` });
   },
 );
 
@@ -1055,14 +1059,14 @@ tool(
       if (chat_id) {
         return ok({ ...await ui(`/api/whatsapp/chats/${chat_id}/messages`, {
           method: 'POST', body: { text, quote_wa_id },
-        }), open_in_ui: `${UI}/whatsapp` });
+        }), open_in_ui: `${LINK}/whatsapp` });
       }
       if (!to || !account_id) return ok({ error: 'chat_id angeben – oder to zusammen mit account_id' });
       return ok({ ...await ui(`/api/whatsapp/accounts/${account_id}/messages`, {
         method: 'POST', body: { to, text },
-      }), open_in_ui: `${UI}/whatsapp` });
+      }), open_in_ui: `${LINK}/whatsapp` });
     } catch (e) {
-      return ok({ error: e.message, open_in_ui: `${UI}/whatsapp` });
+      return ok({ error: e.message, open_in_ui: `${LINK}/whatsapp` });
     }
   },
 );
@@ -1110,7 +1114,7 @@ tool(
 );
 
   // Kontakt-Kontext, Schreibstile, Vermeiden-Regeln – liegen in einer eigenen Datei.
-  registerContextTools({ tool, ok, UI });
+  registerContextTools({ tool, ok, UI: LINK });
 
 // ===========================================================================
 // Vervollständigung: alles, was die Oberfläche kann, kann der KI-Client auch.
@@ -1175,7 +1179,7 @@ tool(
         bounced_at: r.bounced_at, bounce_type: r.bounce_type, bounce_code: r.bounce_code,
         bounce_reason: r.bounce_reason, error: r.error,
       }));
-    return ok({ ...stats, recipients: rows, open_in_ui: `${UI}/outbox` });
+    return ok({ ...stats, recipients: rows, open_in_ui: `${LINK}/outbox` });
   },
 );
 
