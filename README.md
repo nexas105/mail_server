@@ -224,7 +224,7 @@ kommt ohne `ports:` und `.env` aus – Domains, TLS und Geheimnisse übernimmt C
 1. Neue Ressource → **Docker Compose** → dieses Repo, Compose-Pfad
    `/docker-compose.coolify.yml`.
 2. Nach dem ersten Speichern unter **Domains** je Service eintragen:
-   `frontend` → `https://mail.tjl-it.de`, `mcp` → `https://mcp.tjl-it.de`
+   `frontend` → `https://relay.tjl-it.de`, `mcp` → `https://relay-mcp.tjl-it.de`
    (nur wenn MCP über HTTP genutzt wird; sonst den Service löschen). Ist am Server
    die Wildcard `*.tjl-it.de` hinterlegt, schlägt Coolify sonst `frontend-<id>.tjl-it.de` vor.
 3. Deploy. Coolify erzeugt beim ersten Lauf `MAIL_CRYPTO_KEY`, `MAIL_SETUP_TOKEN`,
@@ -543,6 +543,53 @@ Entwurf lässt sich das im Schritt „Senden" abweichend schalten.
 Der Pixel-Endpunkt `/api/t/o/<token>.gif` ist bewusst ohne Anmeldung
 erreichbar — er wird vom Mail-Programm des Empfängers geladen. Er antwortet
 immer mit dem GIF, auch bei unbekanntem Token, und verrät damit nichts.
+
+## Sicherung & Umzug
+
+Alles, was der Server braucht, liegt im Datenverzeichnis (`data/` bzw.
+`MAIL_DATA_DIR`): `mail.db`, `.keyfile`, `attachments/`, `assets/` und
+`whatsapp/` (Sitzungen + Medien). Ein Backup ist ein einziges `.tgz` mit genau
+diesem Inhalt plus `manifest.json`; die Datenbank wird als konsistente Kopie
+inklusive WAL-Inhalt aufgenommen, der Server darf dabei weiterlaufen.
+
+**Exportieren**
+
+- UI: *Einstellungen → System → Sicherung* (nur Administratoren).
+- Kommandozeile: `npm run backup` (schreibt `mail-server-backup-<Datum>.tgz`
+  ins aktuelle Verzeichnis; `npm run backup -- pfad.tgz`, `-- -` für stdout,
+  `--no-media` lässt WhatsApp-Medien weg).
+- HTTP: `curl -H "Authorization: Bearer mst_…" -o backup.tgz https://…/api/backup/export`
+  (`?media=0` ohne WhatsApp-Medien).
+
+**Importieren**
+
+- UI: Archiv unter *Einstellungen → System → Sicherung* hochladen. Der Server
+  legt es als `restore-pending.tgz` ab und beendet sich; beim nächsten Start
+  wird es eingespielt, **bevor** die Datenbank geöffnet wird. In Docker/Coolify
+  startet der Container von selbst neu (`restart: unless-stopped`), lokal
+  startest du ihn von Hand (Launcher/App oder `npm start`). Das Ergebnis steht
+  danach in *Einstellungen → System → Sicherung* bzw. in `data/restore-last.json`.
+- Kommandozeile bei **gestopptem** Server: `npm run restore -- backup.tgz`.
+  Läuft noch ein Prozess auf der Datenbank, bricht der Import ab (`--force`
+  übergeht das – auf eigene Gefahr).
+
+Beim Import wandert der bisherige Stand nach `data/restore-prev-<Zeit>/`
+(nur der jüngste bleibt liegen). Wer zurück will, stoppt den Server und
+verschiebt die Dateien von dort wieder nach `data/`.
+
+**Schlüssel**: Passwörter und Token sind mit dem Schlüssel aus `MAIL_CRYPTO_KEY`
+bzw. `data/.keyfile` verschlüsselt. Hat das Ziel einen anderen Schlüssel (typisch:
+lokal `.keyfile`, auf dem Server `MAIL_CRYPTO_KEY`), schlüsselt der Import alle
+Werte automatisch um – dafür muss das Archiv die `.keyfile` enthalten (Standard)
+oder mit demselben Schlüssel erstellt worden sein. Ist der Zielserver ohne
+`MAIL_CRYPTO_KEY` und ohne `.keyfile` frisch, übernimmt er den Schlüssel aus dem
+Archiv. Werte, die sich nicht entschlüsseln lassen, werden geleert und in
+`restore-last.json` aufgeführt; das interne Service-Token entsteht neu.
+
+**WhatsApp**: Die Sitzungen werden mitgesichert. WhatsApp duldet dieselbe
+Sitzung nur einmal – die alte Instanz vor dem Import stoppen (bzw. dort die
+Konten trennen), sonst werfen sich beide gegenseitig raus. Läuft der MCP-Server
+als eigener Prozess/Container, diesen nach dem Import ebenfalls neu starten.
 
 ## Sicherheit
 

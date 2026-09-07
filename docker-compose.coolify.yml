@@ -7,8 +7,9 @@
 #   SERVICE_HEX_64_CRYPTO      erzeugt MAIL_CRYPTO_KEY (64 Hex-Zeichen)
 #   SERVICE_PASSWORD_*         erzeugt Setup-Token, API-Key und MCP-Token
 # Die Domains stehen nach dem ersten Speichern unter „Domains" je Service und
-# lassen sich dort auf mail.tjl-it.de bzw. mcp.tjl-it.de setzen (Wildcard
-# *.tjl-it.de ist am Server hinterlegt, sonst erzeugt Coolify frontend-<id>.tjl-it.de).
+# lassen sich dort auf relay.tjl-it.de bzw. relay-mcp.tjl-it.de setzen
+# (mail.tjl-it.de ist Mailcow, mcp.tjl-it.de ein anderer Dienst). Ohne Angabe
+# erzeugt Coolify aus der Wildcard *.tjl-it.de einen Namen wie frontend-<id>.tjl-it.de.
 # TLS macht der Coolify-Proxy (Traefik). Keine „ports:" hier – das übernimmt Coolify.
 #
 # Weg der Anfrage: Traefik → frontend (nginx) → backend. Zwei Proxy-Hops,
@@ -57,6 +58,8 @@ services:
   frontend:
     build:
       context: ./frontend
+    expose:
+      - "80"
     environment:
       # Coolify: öffentliche Domain für diesen Dienst, Ziel-Port 80 (nginx).
       - SERVICE_FQDN_FRONTEND_80
@@ -71,12 +74,14 @@ services:
       start_period: 10s
       retries: 3
 
-  # MCP-Server über HTTP für Claude & Co. Eigene Domain (mcp.tjl-it.de), eigenes
+  # MCP-Server über HTTP für Claude & Co. Eigene Domain (relay-mcp.tjl-it.de), eigenes
   # Token. Wer das nicht braucht, löscht den Dienst in Coolify oder lässt ihn ohne Domain.
   mcp:
     build:
       context: ./backend
     command: ["node", "src/mcp-server.js"]
+    expose:
+      - "3010"
     environment:
       - SERVICE_FQDN_MCP_3010
       - MCP_TRANSPORT=http

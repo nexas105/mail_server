@@ -10,6 +10,8 @@
 // MUSS der erste Import bleiben: harden.js setzt die umask beim Import, bevor
 // db.js (über mcp-tools.js) beim Erststart data/ samt mail.db anlegt.
 import { hardenDataDir } from './harden.js';
+// ZWEITER Import: hochgeladenes Backup einspielen, bevor mcp-tools.js db.js lädt.
+import './restore-boot.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createMcpServer } from './mcp-tools.js';
 import { configure, policy } from './mcp-policy.js';

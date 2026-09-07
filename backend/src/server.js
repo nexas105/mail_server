@@ -3,12 +3,16 @@
 // mail.db, .keyfile & Co. (db.js) von vornherein nur für den eigenen Benutzer.
 import { setRestrictiveUmask, hardenDataDir } from './harden.js';
 setRestrictiveUmask(); // idempotent, nur noch zur Verdeutlichung
+// ZWEITER Import: spielt ein hochgeladenes Backup (restore-pending.tgz) ein,
+// bevor db.js weiter unten die Datenbank öffnet. Kein Export, nur Wirkung.
+import './restore-boot.js';
 
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { pipeline } from 'node:stream/promises';
 import * as db from './db.js';
 import { PIXEL_GIF, PIXEL_PATH, trackingBaseUrl, trackingReachable, opensEnabledGlobally } from './tracking.js';
 import * as auth from './auth.js';
@@ -20,7 +24,8 @@ import { fetchInbox, verifyImap, listMailboxes } from './imap.js';
 import * as gh from './github.js';
 import * as wa from './whatsapp.js';
 import { subscribe, ping as waPing, closeAllStreams } from './wa-bus.js';
-import { ROOT_DIR, STATIC_DIR } from './paths.js';
+import { ROOT_DIR, STATIC_DIR, DATA_DIR } from './paths.js';
+import * as backup from './backup.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -1136,6 +1141,73 @@ app.delete('/api/whatsapp/contacts/:id/link', wrap((req, res) =>
   res.json(db.linkWaContact(+req.params.id, null))));
 app.get('/api/contacts/:id/whatsapp', wrap((req, res) =>
   res.json(db.waContactsForContact(+req.params.id))));
+
+// ---- Sicherung ------------------------------------------------------------
+// Export/Import des kompletten Datenverzeichnisses als .tgz (siehe backup.js).
+// Nur Administratoren: das Archiv enthält Schlüssel, Passwörter und alle Mails.
+app.get('/api/backup/export', requireAdmin, wrap(async (req, res) => {
+  const includeMedia = req.query.media !== '0';
+  res.set('Content-Type', 'application/gzip');
+  res.set('Content-Disposition', `attachment; filename="${backup.defaultArchiveName()}"`);
+  res.set('Cache-Control', 'no-store');
+  try {
+    await backup.writeArchive(res, { includeMedia });
+  } catch (e) {
+    console.error('[backup] Export abgebrochen:', e.message);
+    // Kopf ist schon raus – nur noch die Verbindung kappen, damit der Client
+    // ein unvollständiges Archiv erkennt.
+    if (res.headersSent) res.destroy(e); else throw e;
+  }
+}));
+
+app.get('/api/backup/status', requireAdmin, wrap((req, res) => res.json({
+  pending: fs.existsSync(path.join(DATA_DIR, 'restore-pending.tgz'))
+    || fs.existsSync(path.join(DATA_DIR, 'restore-processing.tgz')),
+  last: backup.readLastResult(),
+  key_fingerprint: backup.keyFingerprint(backup.currentKeyHex()),
+  key_source: process.env.MAIL_CRYPTO_KEY ? 'env' : 'keyfile',
+  data_dir_bytes: backup.dataDirBytes(),
+  restart_automatic: !!process.env.MAIL_DATA_DIR && fs.existsSync('/.dockerenv'),
+})));
+
+// Upload wird direkt auf die Platte gestreamt (bis 4 GB) – nicht per
+// express.raw in den Speicher. Danach Vorprüfung, Ablage als
+// restore-pending.tgz und Neustart: restore-boot.js spielt es beim nächsten
+// Start ein. In Docker startet der Container von selbst neu
+// (restart: unless-stopped), lokal muss der Nutzer den Server neu starten.
+const RESTORE_TYPES = ['application/gzip', 'application/x-gzip', 'application/octet-stream'];
+const RESTORE_LIMIT = 4 * 1024 ** 3;
+app.post('/api/backup/restore', requireAdmin, wrap(async (req, res) => {
+  const ct = String(req.get('content-type') || '').split(';')[0].trim().toLowerCase();
+  if (!RESTORE_TYPES.includes(ct)) {
+    return res.status(415).json({ error: `Content-Type ${ct || '(leer)'} wird nicht angenommen – erwartet application/gzip` });
+  }
+  const declared = Number(req.get('content-length') || 0);
+  if (declared > RESTORE_LIMIT) return res.status(413).json({ error: 'Archiv größer als 4 GB' });
+  const pending = path.join(DATA_DIR, 'restore-pending.tgz');
+  const part = pending + '.part';
+  if (fs.existsSync(pending) || fs.existsSync(path.join(DATA_DIR, 'restore-processing.tgz'))) {
+    return res.status(409).json({ error: 'Es liegt bereits eine Wiederherstellung an – bitte Server neu starten' });
+  }
+  let received = 0;
+  try {
+    const out = fs.createWriteStream(part, { mode: 0o600 });
+    req.on('data', chunk => {
+      received += chunk.length;
+      if (received > RESTORE_LIMIT) req.destroy(new Error('Archiv größer als 4 GB'));
+    });
+    await pipeline(req, out);
+    const info = await backup.inspectArchive(part);
+    fs.renameSync(part, pending);
+    res.json({ ok: true, restarting: true, manifest: info.manifest, bytes: received });
+    console.log(`[backup] Archiv (${(received / 1048576).toFixed(1)} MB) angenommen – Neustart zur Wiederherstellung.`);
+    setTimeout(() => shutdown('restore'), 500);
+  } catch (e) {
+    fs.rmSync(part, { force: true });
+    if (res.headersSent) return;
+    res.status(400).json({ error: e.message });
+  }
+}));
 
 // Frontend-Build ausliefern, falls vorhanden. Im Docker-Betrieb übernimmt das
 // nginx – dann fehlt das Verzeichnis, und der Server bleibt reine API.

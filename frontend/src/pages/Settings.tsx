@@ -6,6 +6,7 @@ import { getSettings, setDefaultAccount } from '../lib/settings';
 import { Icon } from '../components/Icon';
 import { TrackingCard } from '../components/TrackingCard';
 import { McpTokensCard, McpLogCard } from '../components/McpAccessCard';
+import { BackupCard } from '../components/BackupCard';
 
 import type {Account, WaAccount } from '../lib/types';
 import { StatusBadge } from '../components/WaStatus';
@@ -60,6 +61,7 @@ export function Settings() {
         <McpLogCard />
 
         <div className="settings-section">System</div>
+        <BackupCard />
         <SystemCard />
       </div>
     </>

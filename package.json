@@ -6,6 +6,8 @@
     "start": "npm --prefix backend start",
     "launch": "npm --prefix backend run launch",
     "mcp": "npm --prefix backend run mcp",
+    "backup": "npm --prefix backend run backup --",
+    "restore": "npm --prefix backend run restore --",
     "install:all": "npm --prefix backend ci && npm --prefix frontend ci",
     "build": "npm --prefix frontend run build",
     "dev:web": "npm --prefix frontend run dev",

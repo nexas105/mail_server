@@ -11,7 +11,9 @@
     "start": "node src/server.js",
     "launch": "node src/launcher.mjs",
     "mcp": "node src/mcp-server.js",
-    "mcp:http": "MCP_TRANSPORT=http node src/mcp-server.js"
+    "mcp:http": "MCP_TRANSPORT=http node src/mcp-server.js",
+    "backup": "node src/backup.js export",
+    "restore": "node src/backup.js import"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
