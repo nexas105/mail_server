@@ -18,3 +18,5 @@ swift/.build/
 # Die Vorlage selbst soll ins Repo (README verweist darauf)
 !.env.example
 !.env.coolify.example
+.playwright-mcp/
+frontend/tsconfig.tsbuildinfo

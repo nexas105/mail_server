@@ -6,12 +6,20 @@
 //
 // Die Werkzeuge stehen in src/mcp-tools.js, die Sicherheits-Richtlinie in
 // src/mcp-policy.js, der HTTP-Betrieb in src/mcp-http.js.
+//
+// MUSS der erste Import bleiben: harden.js setzt die umask beim Import, bevor
+// db.js (über mcp-tools.js) beim Erststart data/ samt mail.db anlegt.
+import { hardenDataDir } from './harden.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createMcpServer } from './mcp-tools.js';
 import { configure, policy } from './mcp-policy.js';
 
 const wantsHttp = process.argv.includes('--http')
   || String(process.env.MCP_TRANSPORT || '').toLowerCase() === 'http';
+
+// Altbestand einmalig zurechtrücken. quiet: stdout gehört im stdio-Betrieb dem
+// Protokoll – harden.js loggt ohnehin nur nach stderr, hier aber ganz still.
+hardenDataDir({ quiet: true });
 
 if (wantsHttp) {
   const { startHttpServer } = await import('./mcp-http.js');

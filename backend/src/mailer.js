@@ -3,7 +3,7 @@ import {
   getAccount, decrypt, getDraft, getRecipients,
   setDraftStatus, setRecipientResult, logSendEvent, attachmentsForSend, composeDraftHtml,
   getCustomFieldDefaults, getAsset, listAttachments, hasSuccessfulTestSend,
-  getAllSettings, setRecipientToken,
+  getAllSettings, setRecipientToken, ensureRelayRef,
 } from './db.js';
 import { newTrackingToken, withPixel, trackingBaseUrl, opensEnabledGlobally } from './tracking.js';
 import { isPrivateHost } from './net-guard.js';
@@ -305,6 +305,10 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
       // To-Empfänger zugeschrieben; mehr gibt eine gemeinsame Mail nicht her.
       const singleToken = tracked ? newTrackingToken() : null;
       if (singleToken) setRecipientToken(to[0].id, singleToken);
+      // Eine Referenz je Empfänger, alle in einer Kopfzeile: Ein Zustellbericht
+      // zitiert die Originalmail komplett zurück, die Zuordnung läuft dann
+      // über Referenz + Final-Recipient-Adresse (siehe imap.js noteBounce).
+      const relayRefs = all.map(r => ensureRelayRef(r.id)).filter(Boolean);
       const info = await transport.sendMail({
         from, replyTo, attachments: attach,
         to: to.map(addr),
@@ -313,7 +317,10 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
         subject: personalize(draft.subject, base),
         html: withPixel(wrapEmailHtml(personalize(composed, base)), singleToken),
         text: personalize(draft.text || htmlToText(composed), base),
-        headers: { 'X-Relay-Draft': String(draftId) },
+        headers: {
+          'X-Relay-Draft': String(draftId),
+          ...(relayRefs.length ? { 'X-Relay-Ref': relayRefs.join(', ') } : {}),
+        },
       });
       for (const r of all) { setRecipientResult(r.id, 'sent', { messageId: info.messageId }); logEv(r, 'sent', { message_id: info.messageId }); }
       sent = to.length; onProgress({ index: 0, total, email: 'alle', status: 'sent' });
@@ -341,7 +348,13 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
           html: withPixel(wrapEmailHtml(personalize(composed, vars)), token),
           text: personalize(draft.text || htmlToText(composed), vars),
           // Hilft der Bounce-Zuordnung: die Meldung zitiert die Kopfzeilen zurück.
-          headers: { 'X-Relay-Draft': String(draftId), 'X-Relay-Recipient': String(r.id) },
+          // X-Relay-Ref ist der eigentliche Beleg (unerratbar, kontogebunden);
+          // X-Relay-Recipient bleibt nur zur Lesbarkeit im Bericht.
+          headers: {
+            'X-Relay-Draft': String(draftId),
+            'X-Relay-Recipient': String(r.id),
+            'X-Relay-Ref': ensureRelayRef(r.id),
+          },
         });
         setRecipientResult(r.id, 'sent', { messageId: info.messageId }); logEv(r, 'sent', { message_id: info.messageId });
         sent++; onProgress({ index: i, total, email: r.email, status: 'sent' });

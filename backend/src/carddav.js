@@ -5,7 +5,7 @@
 // Jede Zieladresse läuft vorher durch src/net-guard.js: die URL kommt aus der
 // Account-Konfiguration, und das Passwort geht per Basic-Auth genau dorthin.
 
-import { assertSafeTarget, assertSafeUrl, assertSameOrigin } from './net-guard.js';
+import { assertSafeUrl, assertSameOrigin, guardedFetch } from './net-guard.js';
 
 const TIMEOUT_MS = 20_000;
 /** Obergrenze für Server-Antworten – schützt Speicher und die Regex-Auswertung. */
@@ -94,18 +94,19 @@ function authHeader(user, pass) {
   return 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64');
 }
 
+// guardedFetch (net-guard.js) prüft Ziel UND jede Weiterleitung – ein Server
+// könnte uns sonst per Location-Header samt Passwort ins interne Netz schicken.
 async function report(url, user, pass) {
-  await assertSafeTarget(url, { purpose: 'CardDAV' });
   const body = `<?xml version="1.0" encoding="utf-8" ?>
 <C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
   <D:prop><D:getetag/><C:address-data/></D:prop>
 </C:addressbook-query>`;
-  const res = await fetch(url, {
+  const res = await guardedFetch(url, {
     method: 'REPORT',
     headers: { Authorization: authHeader(user, pass), 'Content-Type': 'application/xml; charset=utf-8', Depth: '1' },
     body,
     signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  }, { base: url, purpose: 'CardDAV' });
   if (!res.ok) throw new Error(`CardDAV REPORT ${res.status} ${res.statusText}`);
   const xml = await readCapped(res, 'REPORT');
   const cards = xmlElements(xml, 'address-data').map(decodeXmlEntities);
@@ -113,13 +114,12 @@ async function report(url, user, pass) {
 }
 
 async function propfindThenGet(url, user, pass) {
-  await assertSafeTarget(url, { purpose: 'CardDAV' });
-  const res = await fetch(url, {
+  const res = await guardedFetch(url, {
     method: 'PROPFIND',
     headers: { Authorization: authHeader(user, pass), 'Content-Type': 'application/xml; charset=utf-8', Depth: '1' },
     body: '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:getcontenttype/></D:prop></D:propfind>',
     signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  }, { base: url, purpose: 'CardDAV' });
   if (!res.ok) throw new Error(`CardDAV PROPFIND ${res.status} ${res.statusText}`);
   const xml = await readCapped(res, 'PROPFIND');
   const hrefs = xmlElements(xml, 'href')
@@ -136,10 +136,10 @@ async function propfindThenGet(url, user, pass) {
       assertSameOrigin(target, base);
       assertSafeUrl(target, { purpose: 'CardDAV' });
     } catch { continue; }
-    const r = await fetch(target.toString(), {
+    const r = await guardedFetch(target.toString(), {
       headers: { Authorization: authHeader(user, pass) },
       signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    }, { base, purpose: 'CardDAV' });
     if (r.ok) all += '\n' + await readCapped(r, 'GET');
   }
   return all;

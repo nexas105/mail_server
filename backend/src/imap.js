@@ -2,7 +2,7 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import {
   getImapCreds, insertMessage, maxMessageUid,
-  getMessageByUid, findSentRecipient, recordBounce, markMessageBounce,
+  getMessageByUid, findSentRecipient, recordBounce, markMessageBounce, recipientAccountId,
 } from './db.js';
 import { looksLikeBounce, parseBounce } from './tracking.js';
 
@@ -134,35 +134,54 @@ export async function fetchInbox(account, { folder = 'INBOX', limit = 50, onProg
  * „wirklich zugestellt" – ohne das steht im Postausgang für immer „gesendet".
  *
  * Zuordnung in dieser Reihenfolge:
- *   1. X-Relay-Recipient aus der zitierten Originalmail (unsere eigene ID;
- *      die Adresse muss dazu passen, sonst gilt der Treffer nicht)
- *   2. Message-ID aus der zitierten Originalmail (eindeutig)
+ *   1. X-Relay-Ref aus der zitierten Originalmail: 128 Bit Zufall je
+ *      Empfänger, den nur kennt, wer die Mail wirklich bekommen hat. Bei
+ *      mehreren Referenzen (Sammelmail) entscheidet die Final-Recipient-
+ *      Adresse; ohne Adresse zählt nur eine einzelne, eindeutige Referenz.
+ *   2. Message-ID aus der zitierten Originalmail (von nodemailer zufällig
+ *      vergeben, also ebenfalls nicht erratbar).
  *   3. Final-Recipient/X-Failed-Recipients → letzte gesendete Mail an die
  *      Adresse – aber NUR, wenn ein echter Zustellbericht (multipart/report,
  *      message/delivery-status) vorliegt.
- * Ohne einen dieser Belege wird der Empfänger nicht angefasst: Sonst könnte
- * jede Mail mit Betreff „Undeliverable" und einer Adresse im Text einen
- * fremden Versand auf „fehlgeschlagen" setzen. Die Mail selbst wird trotzdem
- * als Bounce markiert – dann eben ohne Zuordnung, statt sie stillschweigend
- * als normale Mail abzulegen.
+ * In allen drei Fällen muss der Bounce im Postfach des Kontos ankommen, über
+ * das der Empfänger versendet wurde – sonst wird er verworfen.
+ * X-Relay-Recipient (fortlaufende ID, erratbar) ist KEIN Beleg mehr: Sonst
+ * könnte jede Mail mit Betreff „Undeliverable" und „X-Relay-Recipient: 345"
+ * im Text einen fremden Versand auf „fehlgeschlagen" setzen, und
+ * resend_failed würde ihn erneut verschicken. Ohne Beleg wird der Empfänger
+ * nicht angefasst; die Mail selbst wird trotzdem als Bounce markiert – dann
+ * eben ohne Zuordnung, statt sie stillschweigend als normale Mail abzulegen.
  */
-function noteBounce(account, folder, uid, parsed) {
+export function noteBounce(account, folder, uid, parsed) {
   try {
     if (!parsed || !looksLikeBounce(parsed)) return false;
     const info = parseBounce(parsed);
     const stored = getMessageByUid(account.id, folder, uid);
 
     let recipient = null;
-    if (info.relayRecipientId) {
-      const byId = findSentRecipient({ email: null, recipientId: info.relayRecipientId });
-      // Die ID allein reicht nicht: Sie ist fortlaufend und damit erratbar.
-      if (byId && (!info.email || String(byId.email).toLowerCase() === info.email)) recipient = byId;
+    if (info.relayRefs?.length) {
+      const hits = [];
+      for (const ref of info.relayRefs) {
+        const hit = findSentRecipient({ email: null, relayRef: ref });
+        if (hit && !hits.some(h => h.id === hit.id)) hits.push(hit);
+      }
+      if (info.email) {
+        recipient = hits.find(h => String(h.email).toLowerCase() === info.email) || null;
+      } else if (hits.length === 1) {
+        recipient = hits[0];
+      }
     }
     if (!recipient && info.messageId) {
       recipient = findSentRecipient({ email: null, messageId: info.messageId });
     }
     if (!recipient && info.structured && info.email) {
       recipient = findSentRecipient({ email: info.email });
+    }
+    // Kontobindung: Ein Bounce landet im Postfach des sendenden Kontos. Kommt
+    // er woanders an, ist er entweder fremd oder gefälscht.
+    if (recipient && recipientAccountId(recipient) !== account.id) {
+      console.log(`[bounce] Konto passt nicht (Empfänger ${recipient.id}, Konto ${account.id}, uid ${uid}) – verworfen`);
+      recipient = null;
     }
 
     if (recipient) {

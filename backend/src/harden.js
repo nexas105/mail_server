@@ -17,14 +17,22 @@ import { DATA_DIR } from './paths.js';
 const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;
 
+// Die umask wird BEIM IMPORT gesetzt, nicht erst durch einen Funktionsaufruf.
+// Grund: ESM wertet sämtliche Imports eines Moduls aus, bevor dessen Rumpf
+// läuft. Ein `setRestrictiveUmask()` im Rumpf von server.js käme also erst
+// NACH db.js dran – und db.js legt mail.db, .keyfile und Verzeichnisse an.
+// Deshalb muss dieser Import in server.js und mcp-server.js der ERSTE sein;
+// harden.js selbst zieht nur node:fs, node:path und paths.js mit, und paths.js
+// legt nichts an.
+// 0o077 = Gruppe und Andere bekommen keinerlei Rechte.
+try { process.umask(0o077); } catch { /* auf manchen Plattformen nicht erlaubt */ }
+
 /**
- * Setzt die umask des Prozesses, sodass neu angelegte Dateien niemandem sonst
- * gehören. Muss vor dem ersten Schreibzugriff laufen – also möglichst früh
- * beim Start, bevor db.js seine Datei anlegt.
+ * Bleibt als Alias erhalten – die eigentliche Arbeit passiert oben beim Import.
+ * Ein erneuter Aufruf ist harmlos (idempotent).
  */
 export function setRestrictiveUmask() {
-  // 0o077 = Gruppe und Andere bekommen keinerlei Rechte.
-  try { process.umask(0o077); } catch { /* auf manchen Plattformen nicht erlaubt */ }
+  try { process.umask(0o077); } catch { /* s.o. */ }
 }
 
 /** Geht data/ einmal durch und zieht Rechte gerade. Meldet, was es geändert hat. */

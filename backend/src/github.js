@@ -7,7 +7,7 @@
  * Dadurch benutzen Web-Server und MCP-Server dasselbe Modul identisch.
  */
 
-import { assertSafeTarget, assertSameOrigin } from './net-guard.js';
+import { assertSameOrigin, guardedFetch } from './net-guard.js';
 
 const UA = 'mail-server/1.0';
 const API_VERSION = '2022-11-28';
@@ -110,7 +110,6 @@ async function toError(res) {
  */
 async function gh(conn, pathOrUrl, { method = 'GET', accept = 'application/vnd.github+json', query, raw = false } = {}) {
   const base = conn.apiBase || 'https://api.github.com';
-  await assertSafeTarget(base, guardOpts());
   // Nachgereichte URLs (paginate() folgt dem Link-Header, den liefert die
   // Gegenstelle) müssen zur konfigurierten API-Adresse gehören.
   if (pathOrUrl.startsWith('http')) assertSameOrigin(pathOrUrl, base);
@@ -121,7 +120,9 @@ async function gh(conn, pathOrUrl, { method = 'GET', accept = 'application/vnd.g
   }
   let res;
   try {
-    res = await fetch(url, {
+    // guardedFetch prüft `url` (gleicher Host wie base) und jede Weiterleitung
+    // gegen net-guard; Redirects auf fremde Origins werden abgelehnt.
+    res = await guardedFetch(url, {
       method,
       headers: {
         Authorization: `Bearer ${conn.token}`,
@@ -130,7 +131,7 @@ async function gh(conn, pathOrUrl, { method = 'GET', accept = 'application/vnd.g
         'User-Agent': UA,   // ohne User-Agent antwortet GitHub mit 403
       },
       signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    }, { base, ...guardOpts() });
   } catch (e) {
     if (e.name === 'TimeoutError' || e.name === 'AbortError')
       throw new Error(`GitHub-Anfrage hat das Zeitlimit (${TIMEOUT_MS / 1000} s) überschritten`);

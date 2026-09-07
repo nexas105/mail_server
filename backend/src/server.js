@@ -1,7 +1,8 @@
-// Muss vor jedem Import stehen, der Dateien anlegt (db.js legt mail.db an):
-// so entstehen alle Dateien in data/ von vornherein nur für den eigenen Benutzer.
+// MUSS der erste Import bleiben: harden.js setzt die umask beim Import, und
+// ESM wertet Imports der Reihe nach VOR dem Modulrumpf aus – nur so entstehen
+// mail.db, .keyfile & Co. (db.js) von vornherein nur für den eigenen Benutzer.
 import { setRestrictiveUmask, hardenDataDir } from './harden.js';
-setRestrictiveUmask();
+setRestrictiveUmask(); // idempotent, nur noch zur Verdeutlichung
 
 import express from 'express';
 import fs from 'node:fs';

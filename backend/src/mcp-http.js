@@ -52,7 +52,10 @@ export async function startHttpServer() {
       + 'rein lokalen Test – MCP_ALLOW_ANONYMOUS=1.');
     process.exit(1);
   }
-  if (!TOKEN && !LOOPBACK) {
+  // Anonymer Betrieb ist nur lokal erlaubt. Die Prüfung greift bewusst NUR im
+  // anonymen Fall – wer statt MCP_TOKEN die in der UI verwalteten Token nutzt,
+  // darf sehr wohl an eine Netz-Adresse binden.
+  if (!TOKEN && !dbTokens && ALLOW_ANONYMOUS && !LOOPBACK) {
     log('FEHLER: MCP_ALLOW_ANONYMOUS ist nur zusammen mit einer Loopback-Bindung erlaubt.');
     process.exit(1);
   }
@@ -114,7 +117,7 @@ export async function startHttpServer() {
   app.use(PATH_, express.json({ limit: BODY_LIMIT }));
 
   // ---- Sitzungen ----------------------------------------------------------
-  /** sessionId → { transport, server, lastSeen, tokenId, tokenName } */
+  /** sessionId → { transport, server, lastSeen, tokenId, tokenName, readonly } */
   const sessions = new Map();
 
   // Eine Sitzung gehört dem Token, das sie eröffnet hat. Ohne diese Prüfung
@@ -162,6 +165,17 @@ export async function startHttpServer() {
           log(`Sitzung ${sessionId.slice(0, 8)}… mit fremdem Token angefragt (${req.mcpAuth?.tokenName || '?'}) – abgewiesen`);
           return res.status(403).json({ jsonrpc: '2.0', error: { code: -32003, message: 'Session belongs to another token' }, id: null });
         }
+        // Die Werkzeugmenge wurde beim Anlegen der Sitzung nach dem damaligen
+        // Nur-Lesen-Status festgelegt (createMcpServer registriert einmalig).
+        // Wird das Token in der UI zwischendurch auf Nur-Lesen gestellt (oder
+        // zurück), gilt zwar die Token-Prüfung je Anfrage – die alten Handler
+        // in der Sitzung wüssten davon aber nichts. Deshalb: Sitzung beenden,
+        // der Client initialisiert neu und bekommt die passende Werkzeugmenge.
+        if (!!req.mcpAuth?.readonly !== !!entry.readonly) {
+          log(`Sitzung ${sessionId.slice(0, 8)}… – Rechte des Tokens geändert (${req.mcpAuth?.tokenName || '?'}) – beendet`);
+          await closeSession(sessionId, 'Rechte geändert');
+          return res.status(403).json({ jsonrpc: '2.0', error: { code: -32004, message: 'Session permissions changed – reinitialize' }, id: null });
+        }
         entry.lastSeen = Date.now();
         await entry.transport.handleRequest(req, res, req.body);
         if (req.method === 'DELETE') await closeSession(sessionId, 'Client-Abmeldung');
@@ -192,7 +206,12 @@ export async function startHttpServer() {
         allowedHosts,
         allowedOrigins,
         onsessioninitialized: id => {
-          sessions.set(id, { transport, server, lastSeen: Date.now(), ...sessionOwner(req.mcpAuth) });
+          // readonly merken: bei jeder weiteren Anfrage wird es gegen den
+          // frischen Token-Status verglichen (siehe „Bestehende Sitzung").
+          sessions.set(id, {
+            transport, server, lastSeen: Date.now(),
+            ...sessionOwner(req.mcpAuth), readonly: !!req.mcpAuth?.readonly,
+          });
           log(`Sitzung ${id.slice(0, 8)}… geöffnet (${sessions.size}/${MAX_SESSIONS})`);
         },
         onsessionclosed: id => closeSession(id, 'Transport geschlossen'),

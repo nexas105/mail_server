@@ -9,8 +9,11 @@ WORKDIR /app
 COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev
 
-COPY src ./src
-COPY content.seed.json accounts.seed.example.json ./
+# /app gehört dem Laufzeit-User node: POST /api/content/export schreibt
+# content.seed.json neben src/ (siehe paths.js) und würde sonst mit EACCES scheitern.
+COPY --chown=node:node src ./src
+COPY --chown=node:node content.seed.json accounts.seed.example.json ./
+RUN chown node:node /app
 
 # Datenverzeichnis (SQLite, Keyfile, WhatsApp-Sessions) – wird als Volume gemountet.
 RUN mkdir -p /data && chown node:node /data
