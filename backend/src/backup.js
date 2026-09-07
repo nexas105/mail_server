@@ -99,12 +99,35 @@ function splitName(name) {
     const rest = name.slice(i + 1);
     if (Buffer.byteLength(prefix) <= 155 && Buffer.byteLength(rest) <= 100 && rest.length) return { name: rest, prefix };
   }
-  throw new Error(`Pfad zu lang für das Archiv: ${name}`);
+  return null; // passt nicht in ustar – der Aufrufer schreibt einen PAX-Header davor
+}
+
+/**
+ * PAX-Erweiterungssatz (Typ 'x') für Namen, die ustar nicht fasst: ein
+ * eigener Eintrag mit „<len> path=<name>\n" direkt vor dem eigentlichen Header.
+ * Unser Reader (und jedes GNU-/BSD-tar) versteht das.
+ */
+function paxHeaderFor(name) {
+  const body = `path=${name}\n`;
+  // Die Längenangabe zählt sich selbst mit – deshalb zwei Durchläufe.
+  let len = Buffer.byteLength(body) + 3;
+  len = String(len).length + 1 + Buffer.byteLength(body);
+  const record = Buffer.from(`${len} ${body}`, 'utf8');
+  const stub = name.slice(0, 60).replace(/[^\w.\-]/g, '_');
+  const header = rawTarHeader({ name: `PaxHeader/${stub}`, prefix: '', size: record.length, type: 'x' });
+  return Buffer.concat([header, record, padBlock(record.length)]);
 }
 
 function tarHeader({ name, size = 0, mode = FILE_MODE, mtime = Date.now() / 1000, type = '0' }) {
+  const split = splitName(name);
+  if (split) return rawTarHeader({ name: split.name, prefix: split.prefix, size, mode, mtime, type });
+  // Zu lang für ustar: PAX-Header voran, im ustar-Feld nur ein gekürzter Platzhalter.
+  const short = name.slice(-100);
+  return Buffer.concat([paxHeaderFor(name), rawTarHeader({ name: short, prefix: '', size, mode, mtime, type })]);
+}
+
+function rawTarHeader({ name: n, prefix = '', size = 0, mode = FILE_MODE, mtime = Date.now() / 1000, type = '0' }) {
   const h = Buffer.alloc(BLOCK, 0);
-  const { name: n, prefix } = splitName(name);
   h.write(n, 0, 100, 'utf8');
   h.write(octal(mode & 0o7777, 8), 100, 8, 'latin1');
   h.write(octal(0, 8), 108, 8, 'latin1');          // uid
