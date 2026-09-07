@@ -1128,6 +1128,24 @@ tool(
 );
 
 tool(
+  'merge_wa_chats',
+  'Führt zwei Einzelchats derselben Person zusammen – typisch, wenn WhatsApp jemanden einmal unter der '
+  + 'Nummer (…@s.whatsapp.net) und einmal unter einer @lid-Kennung führt. Nachrichten, Name und Verknüpfung '
+  + 'wandern in den Ziel-Chat, der Quell-Chat verschwindet, die Zuordnung wird gemerkt. Nur mit Bestätigung '
+  + 'des Nutzers – ein falscher Merge vermischt zwei fremde Gespräche.',
+  {
+    chat_id: z.number().int().describe('Quell-Chat, der aufgelöst wird'),
+    into_chat_id: z.number().int().describe('Ziel-Chat, meist der mit der Telefonnummer'),
+  },
+  async ({ chat_id, into_chat_id }) => {
+    try {
+      const r = await ui(`/api/whatsapp/chats/${chat_id}/merge`, { method: 'POST', body: { into_chat_id } });
+      return ok({ merged: true, moved_messages: r.moved, chat_id: r.chat?.id, jid: r.chat?.jid, name: r.chat?.name, open_in_ui: `${LINK}/whatsapp` });
+    } catch (e) { return ok({ error: e.message }); }
+  },
+);
+
+tool(
   'mark_wa_chat_read',
   'Setzt einen Chat auf gelesen und schickt Lesebestätigungen.',
   { chat_id: z.number().int() },

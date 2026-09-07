@@ -8,7 +8,7 @@ type Handler = (event: string, data: any) => void;
 const handlers = new Set<Handler>();
 let es: EventSource | null = null;
 
-const EVENTS = ['status', 'qr', 'pairing_code', 'message', 'chat', 'sync', 'reaction', 'scheduled'] as const;
+const EVENTS = ['status', 'qr', 'pairing_code', 'message', 'chat', 'sync', 'reaction', 'scheduled', 'chat_removed'] as const;
 
 function open() {
   if (es) return;

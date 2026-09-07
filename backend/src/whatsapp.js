@@ -43,6 +43,38 @@ const phoneOf = jid => {
   return (j.split('@')[0] || '').split(':')[0] || null;
 };
 
+/**
+ * @lid → Nummer, wenn bekannt. WhatsApp adressiert dieselbe Person mal so,
+ * mal so; gespeichert wird immer unter der Nummer, sonst gibt es zwei Chats.
+ */
+const canonicalJid = (session, jid) =>
+  (jid && jid.endsWith('@lid') && db.pnForLid(session.id, jid)) || jid;
+
+/**
+ * Zuordnung lid → Nummer merken. Existiert schon ein Chat unter der @lid,
+ * wandert er in den Nummern-Chat – das ist der eigentliche Reparaturschritt.
+ */
+function learnMapping(session, lid, pn, source) {
+  if (!lid || !pn) return;
+  lid = jidNormalizedUser(lid); pn = jidNormalizedUser(pn);
+  if (!lid.endsWith('@lid') || !pn.endsWith('@s.whatsapp.net')) return;
+  db.setWaJidMap(session.id, lid, pn, source);
+  const lidChat = db.getWaChatByJid(session.id, lid);
+  if (!lidChat) return;
+  const pnChat = db.upsertWaChat(session.id, { jid: pn, is_group: 0 });
+  mergeChats(lidChat.id, pnChat.id, { reason: source });
+}
+
+/** Zwei Einzelchats zusammenführen und die Oberfläche informieren. */
+export function mergeChats(fromId, intoId, { reason = 'manual' } = {}) {
+  const from = db.getWaChat(fromId);
+  const { moved, chat } = db.mergeWaChats(fromId, intoId);
+  log(`Chat ${from?.jid} → ${chat.jid} zusammengeführt (${moved} Nachrichten, ${reason})`);
+  emit('chat_removed', { chat_id: fromId, into_chat_id: intoId });
+  emit('chat', chat);
+  return { moved, chat };
+}
+
 function ensureDirs(id) {
   const auth = path.join(WA_DIR, String(id), 'auth');
   fs.mkdirSync(auth, { recursive: true, mode: 0o700 });
@@ -209,8 +241,20 @@ const snippetOf = (type, body) => {
 
 /** Baileys-Nachricht → Zeile für wa_messages. Chat wird dabei angelegt. */
 function toRow(session, msg, { origin = null } = {}) {
-  const jid = msg.key?.remoteJid;
+  let jid = msg.key?.remoteJid;
   if (!jid || jid === 'status@broadcast') return null;
+  // Einzelchat unter @lid: WhatsApp schickt bei eingehenden Nachrichten die
+  // Nummer als sender_pn mit. Merken – und ab hier unter der Nummer ablegen.
+  if (jid.endsWith('@lid')) {
+    if (!msg.key.fromMe && !msg.key.participant && msg.key.senderPn) {
+      learnMapping(session, jid, msg.key.senderPn, 'message');
+    }
+    jid = canonicalJid(session, jid);
+  }
+  // Gruppen: Teilnehmer können ebenfalls als @lid kommen, participant_pn verrät die Nummer.
+  if (msg.key?.participant && msg.key.participantPn) {
+    learnMapping(session, msg.key.participant, msg.key.participantPn, 'message');
+  }
   const d = describeMessage(msg);
   const ts = Number(msg.messageTimestamp?.low ?? msg.messageTimestamp ?? 0) || nowSec();
   const isGroup = isJidGroup(jid);
@@ -235,7 +279,9 @@ function toRow(session, msg, { origin = null } = {}) {
     chat_id: chat.id,
     wa_id: msg.key.id,
     chat_jid: jid,
-    sender_jid: msg.key.participant || (msg.key.fromMe ? session.jid : jid),
+    sender_jid: msg.key.participant
+      ? (msg.key.participantPn ? jidNormalizedUser(msg.key.participantPn) : canonicalJid(session, msg.key.participant))
+      : (msg.key.fromMe ? session.jid : jid),
     sender_name: msg.pushName || null,
     from_me: msg.key.fromMe ? 1 : 0,
     ts,
@@ -609,7 +655,10 @@ function wireEvents(session, sock, authDir) {
       // Nachricht, auf die sie zeigen – sonst zerreißt es den Verlauf.
       const react = msg.message?.reactionMessage;
       if (react?.key?.id) {
-        const chatJid = msg.key.remoteJid;
+        if (msg.key.remoteJid?.endsWith('@lid') && !msg.key.fromMe && !msg.key.participant && msg.key.senderPn) {
+          learnMapping(session, msg.key.remoteJid, msg.key.senderPn, 'message');
+        }
+        const chatJid = canonicalJid(session, msg.key.remoteJid);
         db.setWaReaction({
           wa_account_id: session.id,
           chat_jid: chatJid,
@@ -649,14 +698,14 @@ function wireEvents(session, sock, authDir) {
       if (s == null || !u.key?.id) continue;
       // Baileys-Status: 2=sent 3=delivered 4=read 5=played
       const map = { 2: 'sent', 3: 'delivered', 4: 'read', 5: 'read' };
-      if (map[s]) db.updateWaMessageStatus(session.id, u.key.remoteJid, u.key.id, map[s]);
+      if (map[s]) db.updateWaMessageStatus(session.id, canonicalJid(session, u.key.remoteJid), u.key.id, map[s]);
     }
   }));
 
   sock.ev.on('chats.update', guard(updates => {
     for (const c of updates) {
       if (!c.id) continue;
-      const chat = db.getWaChatByJid(session.id, c.id);
+      const chat = db.getWaChatByJid(session.id, canonicalJid(session, c.id));
       if (chat && c.unreadCount != null) {
         db.setWaChatUnread(chat.id, c.unreadCount);
         emit('chat', db.getWaChat(chat.id));
@@ -701,19 +750,27 @@ function wireEvents(session, sock, authDir) {
   const saveContacts = list => db.tx(() => {
     for (const c of list) {
       if (!c.id) continue;
+      // Kontakte tragen oft beide Kennungen – die beste Quelle für die Zuordnung.
+      const lid = c.lid || (c.id.endsWith('@lid') ? c.id : null);
+      const pn = c.jid || (c.id.endsWith('@s.whatsapp.net') ? c.id : null);
+      if (lid && pn) learnMapping(session, lid, pn, 'contact');
+      const jid = isJidGroup(c.id) ? c.id : (pn || canonicalJid(session, c.id));
       db.upsertWaContact(session.id, {
-        jid: c.id, phone: phoneOf(c.id),
+        jid, phone: phoneOf(jid),
         push_name: c.notify || null,
         name: c.name || c.verifiedName || null,
-        is_group: isJidGroup(c.id) ? 1 : 0,
+        is_group: isJidGroup(jid) ? 1 : 0,
       });
       // Einzelchats zeigen sonst nur die nackte Kennung.
-      if (!isJidGroup(c.id)) {
+      if (!isJidGroup(jid)) {
         const nice = c.name || c.verifiedName || c.notify;
-        if (nice) db.upsertWaChat(session.id, { jid: c.id, name: nice, is_group: 0 });
+        if (nice) db.upsertWaChat(session.id, { jid, name: nice, is_group: 0 });
       }
     }
   });
+
+  // Jemand hat seine Nummer freigegeben – die direkteste Zuordnung überhaupt.
+  sock.ev.on('chats.phoneNumberShare', guard(({ lid, jid }) => learnMapping(session, lid, jid, 'share')));
 
   sock.ev.on('contacts.update', guard(updates => {
     saveContacts(updates);
@@ -723,8 +780,10 @@ function wireEvents(session, sock, authDir) {
   sock.ev.on('chats.upsert', guard(chats => db.tx(() => {
     for (const c of chats) {
       if (!c.id) continue;
+      if (c.lidJid && c.id.endsWith('@s.whatsapp.net')) learnMapping(session, c.lidJid, c.id, 'history');
+      const jid = canonicalJid(session, c.id);
       db.upsertWaChat(session.id, {
-        jid: c.id, name: c.name || null, is_group: isJidGroup(c.id),
+        jid, name: c.name || null, is_group: isJidGroup(jid),
         unread: c.unreadCount ?? null,
         last_message_ts: c.conversationTimestamp ? Number(c.conversationTimestamp) : null,
       });
@@ -736,22 +795,18 @@ function wireEvents(session, sock, authDir) {
   sock.ev.on('messaging-history.set', guard(({ chats, contacts, messages, isLatest, progress }) => {
     let added = 0;
     db.tx(() => {
+      // Erst die Kontakte (sie tragen lid + Nummer), dann die Chats – so landen
+      // die Chats gleich unter der richtigen Kennung.
+      saveContacts(contacts || []);
       for (const c of chats || []) {
         if (!c.id) continue;
+        if (c.lidJid && c.id.endsWith('@s.whatsapp.net')) learnMapping(session, c.lidJid, c.id, 'history');
+        const jid = canonicalJid(session, c.id);
         db.upsertWaChat(session.id, {
-          jid: c.id, name: c.name || null, is_group: isJidGroup(c.id),
+          jid, name: c.name || null, is_group: isJidGroup(jid),
           unread: c.unreadCount ?? null, archived: c.archived ?? null,
           last_message_ts: c.conversationTimestamp ? Number(c.conversationTimestamp) : null,
         });
-      }
-      for (const c of contacts || []) {
-        if (!c.id) continue;
-        db.upsertWaContact(session.id, {
-          jid: c.id, phone: phoneOf(c.id), push_name: c.notify || null,
-          name: c.name || c.verifiedName || null, is_group: isJidGroup(c.id) ? 1 : 0,
-        });
-        const nice = c.name || c.verifiedName || c.notify;
-        if (nice && !isJidGroup(c.id)) db.upsertWaChat(session.id, { jid: c.id, name: nice, is_group: 0 });
       }
       const rows = [];
       for (const msg of messages || []) {
@@ -910,7 +965,10 @@ export async function resolveJid(id, phone) {
   const session = assertConnected(id);
   const digits = String(phone).replace(/\D/g, '');
   const [hit] = await session.sock.onWhatsApp(digits + '@s.whatsapp.net');
-  return hit?.exists ? jidNormalizedUser(hit.jid) : null;
+  if (!hit?.exists) return null;
+  const pn = jidNormalizedUser(hit.jid);
+  if (hit.lid) learnMapping(session, hit.lid, pn, 'contact');
+  return pn;
 }
 
 /**

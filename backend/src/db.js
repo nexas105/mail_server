@@ -1713,10 +1713,16 @@ migrateContactsEmailOptional();
  * fn MUSS synchron sein: node:sqlite ist synchron, ein `await` im Rumpf würde die
  * Schreibsperre über die Event-Loop halten und den anderen Prozess blockieren.
  */
+let txDepth = 0;
 export function tx(fn) {
+  // Verschachtelt aufgerufen (z.B. Merge innerhalb des Verlaufs-Syncs): einfach
+  // in der laufenden Transaktion weitermachen.
+  if (txDepth > 0) return fn();
   db.exec('BEGIN IMMEDIATE');
+  txDepth++;
   try { const r = fn(); db.exec('COMMIT'); return r; }
   catch (e) { try { db.exec('ROLLBACK'); } catch { /* egal */ } throw e; }
+  finally { txDepth--; }
 }
 
 // Rückreparatur für Verknüpfungen aus älteren Versionen: nur leere Nummern
@@ -2188,4 +2194,103 @@ export function waScheduledPendingCount(chatId = null) {
   return chatId
     ? db.prepare(`SELECT COUNT(*) AS n FROM wa_scheduled WHERE status='pending' AND chat_id=?`).get(chatId).n
     : db.prepare(`SELECT COUNT(*) AS n FROM wa_scheduled WHERE status='pending'`).get().n;
+}
+
+/* ---- LID ↔ Telefonnummer ------------------------------------------------- */
+// WhatsApp adressiert Gesprächspartner zunehmend über anonyme @lid-Kennungen
+// statt über die Nummer (@s.whatsapp.net). Beides ist dieselbe Person – ohne
+// diese Tabelle entsteht für jede Kennung ein eigener Chat. Gelernt wird die
+// Zuordnung aus dem, was WhatsApp nebenbei mitschickt (sender_pn an der
+// Nachricht, lid am Kontakt, Nummern-Freigabe) oder aus einem manuellen Merge.
+db.exec(`
+CREATE TABLE IF NOT EXISTS wa_jid_map (
+  wa_account_id INTEGER NOT NULL REFERENCES wa_accounts(id) ON DELETE CASCADE,
+  lid TEXT NOT NULL,
+  pn TEXT NOT NULL,
+  source TEXT,                               -- message|contact|share|manual|history
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (wa_account_id, lid)
+);
+CREATE INDEX IF NOT EXISTS idx_wa_jid_map_pn ON wa_jid_map(wa_account_id, pn);
+`);
+
+/** Merkt sich lid → pn. Liefert true, wenn die Zuordnung neu war. */
+export function setWaJidMap(waAccountId, lid, pn, source = null) {
+  if (!lid || !pn || !lid.endsWith('@lid') || !pn.endsWith('@s.whatsapp.net')) return false;
+  const r = db.prepare(
+    `INSERT OR IGNORE INTO wa_jid_map (wa_account_id, lid, pn, source) VALUES (?, ?, ?, ?)`)
+    .run(waAccountId, lid, pn, source);
+  return r.changes > 0;
+}
+export function pnForLid(waAccountId, lid) {
+  return db.prepare('SELECT pn FROM wa_jid_map WHERE wa_account_id=? AND lid=?').get(waAccountId, lid)?.pn || null;
+}
+export function lidForPn(waAccountId, pn) {
+  return db.prepare('SELECT lid FROM wa_jid_map WHERE wa_account_id=? AND pn=?').get(waAccountId, pn)?.lid || null;
+}
+
+/**
+ * Führt Chat `fromId` in Chat `intoId` zusammen: Nachrichten, Reaktionen,
+ * geplante Aufträge, Ungelesen-Zähler, Name und Kontaktverknüpfung wandern
+ * mit, der Quell-Chat verschwindet. Nachrichten, die es im Ziel schon gibt
+ * (gleiche wa_id), werden verworfen.
+ */
+export function mergeWaChats(fromId, intoId) {
+  const from = getWaChat(fromId);
+  const into = getWaChat(intoId);
+  if (!from || !into) throw new Error('Chat nicht gefunden');
+  if (from.id === into.id) throw new Error('Ein Chat lässt sich nicht mit sich selbst zusammenführen');
+  if (from.wa_account_id !== into.wa_account_id) throw new Error('Chats gehören zu verschiedenen WhatsApp-Konten');
+  if (from.is_group || into.is_group) throw new Error('Gruppen lassen sich nicht zusammenführen');
+
+  let moved = 0;
+  tx(() => {
+    // Nachrichten: Ziel-Chat und Ziel-JID übernehmen. Doppelte (gleiche wa_id)
+    // fallen durch OR IGNORE raus und werden anschließend gelöscht.
+    moved = db.prepare(
+      `UPDATE OR IGNORE wa_messages SET chat_id=?, chat_jid=?,
+         sender_jid=CASE WHEN sender_jid=? THEN ? ELSE sender_jid END
+       WHERE chat_id=?`).run(into.id, into.jid, from.jid, into.jid, from.id).changes;
+    db.prepare('DELETE FROM wa_messages WHERE chat_id=?').run(from.id);
+    db.prepare(
+      `UPDATE OR IGNORE wa_reactions SET chat_jid=?,
+         sender_jid=CASE WHEN sender_jid=? THEN ? ELSE sender_jid END
+       WHERE wa_account_id=? AND chat_jid=?`).run(into.jid, from.jid, into.jid, from.wa_account_id, from.jid);
+    db.prepare('DELETE FROM wa_reactions WHERE wa_account_id=? AND chat_jid=?').run(from.wa_account_id, from.jid);
+    db.prepare('UPDATE wa_scheduled SET chat_id=? WHERE chat_id=?').run(into.id, from.id);
+
+    // Chat-Kopf: Name nur füllen, nie überschreiben; Zähler und Zeitstempel zusammenziehen.
+    db.prepare(
+      `UPDATE wa_chats SET
+         name = COALESCE(NULLIF(name,''), ?),
+         unread = unread + ?,
+         last_message_ts = MAX(COALESCE(last_message_ts,0), COALESCE(?,0)),
+         last_snippet = CASE WHEN COALESCE(?,0) > COALESCE(last_message_ts,0) THEN ? ELSE last_snippet END,
+         oldest_synced_ts = MIN(COALESCE(oldest_synced_ts, 9e15), COALESCE(?, 9e15))
+       WHERE id=?`)
+      .run(from.name || null, from.unread || 0, from.last_message_ts, from.last_message_ts, from.last_snippet,
+        from.oldest_synced_ts, into.id);
+    if (into.last_message_ts == null && from.last_message_ts == null) { /* nichts */ }
+
+    // Kontaktdaten: Namen und Adressbuch-Verknüpfung mitnehmen, Quelle löschen.
+    const src = db.prepare('SELECT * FROM wa_contacts WHERE wa_account_id=? AND jid=?').get(from.wa_account_id, from.jid);
+    if (src) {
+      upsertWaContact(into.wa_account_id, {
+        jid: into.jid, phone: null, push_name: src.push_name, name: src.name, is_group: 0,
+      });
+      if (src.contact_id) {
+        db.prepare('UPDATE wa_contacts SET contact_id=COALESCE(contact_id, ?) WHERE wa_account_id=? AND jid=?')
+          .run(src.contact_id, into.wa_account_id, into.jid);
+      }
+      db.prepare('DELETE FROM wa_contacts WHERE id=?').run(src.id);
+    }
+    db.prepare('DELETE FROM wa_chats WHERE id=?').run(from.id);
+
+    // Wenn eine Seite @lid ist und die andere die Nummer: Zuordnung merken, damit
+    // die nächste Nachricht gleich im richtigen Chat landet.
+    const lid = [from.jid, into.jid].find(j => j.endsWith('@lid'));
+    const pn = [from.jid, into.jid].find(j => j.endsWith('@s.whatsapp.net'));
+    if (lid && pn) setWaJidMap(from.wa_account_id, lid, pn, 'manual');
+  });
+  return { moved, chat: getWaChat(into.id) };
 }

@@ -1007,6 +1007,15 @@ app.get('/api/whatsapp/chats/:id/messages', wrap((req, res) => res.json(db.listW
   limit: +req.query.limit || 50,
   beforeTs: req.query.before_ts ? +req.query.before_ts : null,
 }))));
+// Zwei Einzelchats derselben Person zusammenführen (z.B. @lid-Kennung und
+// Nummer). Merkt sich die Zuordnung, damit es nicht wieder passiert.
+app.post('/api/whatsapp/chats/:id/merge', wrap((req, res) => {
+  const from = db.getWaChat(+req.params.id);
+  const into = db.getWaChat(+req.body?.into_chat_id);
+  if (!from || !into) return res.status(404).json({ error: 'Chat nicht gefunden' });
+  try { res.json(wa.mergeChats(from.id, into.id, { reason: 'manual' })); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+}));
 app.post('/api/whatsapp/chats/:id/read', wrap(async (req, res) => {
   const chat = db.getWaChat(+req.params.id);
   if (!chat) return res.status(404).json({ error: 'not found' });

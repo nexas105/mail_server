@@ -83,6 +83,11 @@ function ChatsTab({ accountId, connected }: { accountId: number | null; connecte
   useEffect(() => { setChats(null); load(); }, [accountId]);
 
   useEffect(() => onWaEvent((event, data) => {
+    if (event === 'chat_removed' && data?.chat_id) {
+      setChats(cs => cs ? cs.filter(c => c.id !== data.chat_id) : cs);
+      setSelected(sel => sel === data.chat_id ? (data.into_chat_id || null) : sel);
+      return;
+    }
     if (event === 'message' || event === 'chat') {
       // Der Server schickt den ganzen Chat mit – Liste an Ort und Stelle nachziehen.
       setChats(cs => {
@@ -169,7 +174,8 @@ function ChatsTab({ accountId, connected }: { accountId: number | null; connecte
 
         <div className="editor-preview">
           {selected
-            ? <Thread key={selected} chatId={selected} connected={connected} />
+            ? <Thread key={selected} chatId={selected} connected={connected}
+                chats={chats || []} onMerged={id => { setSelected(id); load(); }} />
             : <div className="empty"><Icon name="chat" size={26} /><div>Chat auswählen</div></div>}
         </div>
       </div>
@@ -179,7 +185,9 @@ function ChatsTab({ accountId, connected }: { accountId: number | null; connecte
 
 /* ----------------------------------------------------------------- Thread */
 
-function Thread({ chatId, connected }: { chatId: number; connected: boolean }) {
+function Thread({ chatId, connected, chats, onMerged }: {
+  chatId: number; connected: boolean; chats: WaChat[]; onMerged: (intoId: number) => void;
+}) {
   const [chat, setChat] = useState<WaChat | null>(null);
   const [msgs, setMsgs] = useState<WaMessage[] | null>(null);
   const [text, setText] = useState('');
@@ -194,6 +202,8 @@ function Thread({ chatId, connected }: { chatId: number; connected: boolean }) {
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [cq, setCq] = useState('');
   // Geplante Nachrichten: Panel zum Anlegen + Liste der offenen Aufträge.
+  const [merging, setMerging] = useState(false);
+  const [mq, setMq] = useState('');
   const [planning, setPlanning] = useState(false);
   const [planAt, setPlanAt] = useState('');
   const [planNote, setPlanNote] = useState('');
@@ -252,6 +262,24 @@ function Thread({ chatId, connected }: { chatId: number; connected: boolean }) {
       setText('');
     } catch (e) { toast((e as Error).message, 'err'); }
     setSending(false);
+  }
+
+  /** Diesen Chat in einen anderen auflösen – z.B. @lid-Doppelgänger in den Nummern-Chat. */
+  async function mergeInto(target: WaChat) {
+    const me = chat?.name || chat?.jid.split('@')[0] || 'dieser Chat';
+    const them = target.name || target.jid.split('@')[0];
+    if (!await confirmDialog({
+      title: 'Chats zusammenführen?',
+      message: `„${me}" wird in „${them}" aufgelöst. Alle Nachrichten wandern dorthin, die Zuordnung wird gemerkt. Das lässt sich nicht rückgängig machen.`,
+      confirmLabel: 'Zusammenführen', danger: true,
+    })) return;
+    try {
+      const r = await api<{ moved: number; chat: WaChat }>(`/whatsapp/chats/${chatId}/merge`,
+        { method: 'POST', body: { into_chat_id: target.id } });
+      toast(`Zusammengeführt, ${r.moved} Nachrichten übernommen`);
+      setMerging(false);
+      onMerged(target.id);
+    } catch (e) { toast((e as Error).message, 'err'); }
   }
 
   /** Vorbelegung fürs Planen: nächste volle Stunde, als Wert für datetime-local. */
@@ -384,7 +412,46 @@ function Thread({ chatId, connected }: { chatId: number; connected: boolean }) {
         <button className="btn ghost sm" disabled={!connected || loadingMore} onClick={loadOlder}>
           <Icon name="download" size={13} /> {loadingMore ? '…' : 'Ältere'}
         </button>
+        {!chat?.is_group && (
+          <button className={'btn ghost sm' + (merging ? ' active' : '')}
+            title="Diesen Chat in einen anderen auflösen (z.B. Doppelgänger mit @lid-Kennung)"
+            onClick={() => { setMerging(m => !m); setPicking(false); }}>
+            <Icon name="copy" size={13} /> Zusammenführen
+          </button>
+        )}
       </div>
+
+      {merging && (
+        <div className="card" style={{ marginBottom: 8, padding: 12 }}>
+          <div className="muted small" style={{ marginBottom: 8 }}>
+            {chat?.jid.endsWith('@lid')
+              ? 'Dieser Chat läuft unter einer anonymen @lid-Kennung. Wähle den Chat mit der Telefonnummer derselben Person – Nachrichten und Name wandern dorthin, künftige Nachrichten landen direkt richtig.'
+              : 'Wähle den Chat, in den dieser aufgelöst werden soll. Alle Nachrichten wandern dorthin.'}
+          </div>
+          <div className="searchbox">
+            <Icon name="search" size={14} />
+            <input autoFocus value={mq} placeholder="Chat suchen (Name oder Nummer)" onChange={e => setMq(e.target.value)} />
+          </div>
+          <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6 }}>
+            {chats
+              .filter(c => c.id !== chatId && !c.is_group)
+              .filter(c => !mq.trim() || (c.name || '').toLowerCase().includes(mq.toLowerCase()) || c.jid.includes(mq))
+              .slice(0, 15)
+              .map(c => (
+                <div key={c.id} className="list-item" onClick={() => mergeInto(c)}>
+                  <div className="grow" style={{ minWidth: 0 }}>
+                    <div className="title">{c.name || c.jid.split('@')[0]}</div>
+                    <div className="muted small">{c.jid.endsWith('@lid') ? 'anonyme Kennung' : c.jid.split('@')[0]}{c.last_snippet ? ' · ' + c.last_snippet.slice(0, 60) : ''}</div>
+                  </div>
+                </div>
+              ))}
+          </div>
+          <div className="toolbar" style={{ marginTop: 8, marginBottom: 0 }}>
+            <span className="grow" />
+            <button className="btn ghost sm" onClick={() => setMerging(false)}>Abbrechen</button>
+          </div>
+        </div>
+      )}
 
       {picking && (
         <div className="card" style={{ marginBottom: 8, padding: 12 }}>
