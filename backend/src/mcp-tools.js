@@ -988,6 +988,7 @@ tool(
         text: m.body ? String(m.body).slice(0, 500) : m.snippet,
         truncated: !!(m.body && m.body.length > 500),
         media: m.media_mime ? { mime: m.media_mime, filename: m.media_filename, downloaded: !!m.media_downloaded } : null,
+        transcript: m.type === 'audio' ? (m.transcript_status || 'none') : undefined,
         status: m.status,
         origin: m.origin,
       })),
