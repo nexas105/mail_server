@@ -1,0 +1,111 @@
+# Mail-Server für Coolify (Docker-Compose-Ressource).
+#
+# In Coolify: Neue Ressource → „Docker Compose" → dieses Repo, Compose-Pfad
+# /docker-compose.coolify.yml. Coolify erkennt die SERVICE_*-Variablen:
+#   SERVICE_FQDN_FRONTEND_80   Domain für die Oberfläche (nginx, Port 80)
+#   SERVICE_FQDN_MCP_3010      Domain für den MCP-Server (optional)
+#   SERVICE_HEX_64_CRYPTO      erzeugt MAIL_CRYPTO_KEY (64 Hex-Zeichen)
+#   SERVICE_PASSWORD_*         erzeugt Setup-Token, API-Key und MCP-Token
+# Die Domains stehen nach dem ersten Speichern unter „Domains" je Service und
+# lassen sich dort auf mail.tjl-it.de bzw. mcp.tjl-it.de setzen (Wildcard
+# *.tjl-it.de ist am Server hinterlegt, sonst erzeugt Coolify frontend-<id>.tjl-it.de).
+# TLS macht der Coolify-Proxy (Traefik). Keine „ports:" hier – das übernimmt Coolify.
+#
+# Weg der Anfrage: Traefik → frontend (nginx) → backend. Zwei Proxy-Hops,
+# darum MAIL_TRUST_PROXY=2, damit Rate-Limits die echte Client-IP sehen.
+#
+# SQLite (WAL) liegt im Volume mail-data und wird von backend und mcp
+# gemeinsam benutzt – beide Container laufen auf demselben Host.
+
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      - BIND_HOST=0.0.0.0
+      - PORT=3000
+      - MAIL_DATA_DIR=/data
+      - MAIL_TRUST_PROXY=2
+      - MAIL_COOKIE_SECURE=1
+      # Host-Allowlist: nur die eigene Domain; intern zusätzlich Dienstname und Loopback.
+      - MAIL_ALLOWED_HOSTS=${SERVICE_FQDN_FRONTEND}
+      - MAIL_INTERNAL_HOSTS=backend,127.0.0.1,localhost
+      # Adresse, unter der Empfänger den Server erreichen (Zählpixel).
+      - MAIL_PUBLIC_URL=${SERVICE_URL_FRONTEND}
+      # Geheimnisse – von Coolify beim ersten Deploy erzeugt und danach stabil.
+      - MAIL_CRYPTO_KEY=${SERVICE_HEX_64_CRYPTO}
+      - MAIL_SETUP_TOKEN=${SERVICE_PASSWORD_SETUP}
+      - MAIL_API_KEY=${SERVICE_PASSWORD_64_APIKEY}
+      # Optionales Verhalten (in der Coolify-Oberfläche änderbar).
+      - MAIL_SESSION_HOURS=${MAIL_SESSION_HOURS:-12}
+      - MAIL_SESSION_REMEMBER_DAYS=${MAIL_SESSION_REMEMBER_DAYS:-30}
+      - MAIL_API_RATE_LIMIT=${MAIL_API_RATE_LIMIT:-60}
+      - MAIL_ALLOW_PRIVATE_HOSTS=${MAIL_ALLOW_PRIVATE_HOSTS:-0}
+      - MAIL_IMAP_ALLOW_SELF_SIGNED=${MAIL_IMAP_ALLOW_SELF_SIGNED:-0}
+      - WA_AUTOSTART=${WA_AUTOSTART:-1}
+      - MAIL_WA_MCP_SEND=${MAIL_WA_MCP_SEND:-0}
+    volumes:
+      - mail-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      # Coolify: öffentliche Domain für diesen Dienst, Ziel-Port 80 (nginx).
+      - SERVICE_FQDN_FRONTEND_80
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  # MCP-Server über HTTP für Claude & Co. Eigene Domain (mcp.tjl-it.de), eigenes
+  # Token. Wer das nicht braucht, löscht den Dienst in Coolify oder lässt ihn ohne Domain.
+  mcp:
+    build:
+      context: ./backend
+    command: ["node", "src/mcp-server.js"]
+    environment:
+      - SERVICE_FQDN_MCP_3010
+      - MCP_TRANSPORT=http
+      - MCP_BIND_HOST=0.0.0.0
+      - MCP_PORT=3010
+      - MCP_TRUST_PROXY=1
+      - MCP_TOKEN=${SERVICE_PASSWORD_64_MCPTOKEN}
+      - MCP_ALLOWED_HOSTS=${SERVICE_FQDN_MCP}
+      - MCP_ALLOWED_ORIGINS=${MCP_ALLOWED_ORIGINS:-https://claude.ai}
+      - MCP_READONLY=${MCP_READONLY:-0}
+      - MCP_RATE_LIMIT=${MCP_RATE_LIMIT:-120}
+      - MAIL_DATA_DIR=/data
+      - MAIL_CRYPTO_KEY=${SERVICE_HEX_64_CRYPTO}
+      # Der MCP-Prozess spricht den Web-Server intern an (WhatsApp-Socket lebt nur dort).
+      - MAIL_UI_URL=http://backend:3000
+      - MAIL_WA_MCP_SEND=${MAIL_WA_MCP_SEND:-0}
+      - WA_AUTOSTART=0
+    volumes:
+      - mail-data:/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3010/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  mail-data: {}
