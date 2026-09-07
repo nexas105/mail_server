@@ -2126,7 +2126,13 @@ CREATE TABLE IF NOT EXISTS wa_scheduled (
 CREATE INDEX IF NOT EXISTS idx_wa_scheduled_due ON wa_scheduled(status, send_at);
 `);
 
-const WA_SCHED_COLS = `s.*, c.name AS chat_name, c.jid AS chat_jid, c.is_group`;
+// Anzeigename wie in listWaChats – sonst steht im Auftrag nur die nackte Kennung.
+const WA_SCHED_COLS = `s.*, c.jid AS chat_jid, c.is_group,
+  COALESCE(NULLIF(c.name,''), NULLIF(wc.name,''), NULLIF(wc.push_name,''), NULLIF(ct.name,''), wc.phone) AS chat_name`;
+const WA_SCHED_FROM = `FROM wa_scheduled s
+  JOIN wa_chats c ON c.id = s.chat_id
+  LEFT JOIN wa_contacts wc ON wc.wa_account_id = c.wa_account_id AND wc.jid = c.jid
+  LEFT JOIN contacts ct ON ct.id = wc.contact_id`;
 
 export function createWaScheduled({ wa_account_id, chat_id, text, send_at, origin = 'ui', note = null }) {
   const info = db.prepare(
@@ -2136,7 +2142,7 @@ export function createWaScheduled({ wa_account_id, chat_id, text, send_at, origi
 }
 export function getWaScheduled(id) {
   return db.prepare(
-    `SELECT ${WA_SCHED_COLS} FROM wa_scheduled s JOIN wa_chats c ON c.id = s.chat_id WHERE s.id=?`).get(id);
+    `SELECT ${WA_SCHED_COLS} ${WA_SCHED_FROM} WHERE s.id=?`).get(id);
 }
 /**
  * Offene Aufträge zuerst (nach Sendezeit), danach die zuletzt erledigten –
@@ -2149,7 +2155,7 @@ export function listWaScheduled({ waAccountId = null, chatId = null, status = nu
   if (status) { where.push('s.status=?'); args.push(status); }
   args.push(limit);
   return db.prepare(
-    `SELECT ${WA_SCHED_COLS} FROM wa_scheduled s JOIN wa_chats c ON c.id = s.chat_id
+    `SELECT ${WA_SCHED_COLS} ${WA_SCHED_FROM}
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
      ORDER BY CASE s.status WHEN 'pending' THEN 0 ELSE 1 END, 
               CASE s.status WHEN 'pending' THEN s.send_at ELSE -s.send_at END
@@ -2157,7 +2163,7 @@ export function listWaScheduled({ waAccountId = null, chatId = null, status = nu
 }
 export function dueWaScheduled(now = Math.floor(Date.now() / 1000)) {
   return db.prepare(
-    `SELECT ${WA_SCHED_COLS} FROM wa_scheduled s JOIN wa_chats c ON c.id = s.chat_id
+    `SELECT ${WA_SCHED_COLS} ${WA_SCHED_FROM}
      WHERE s.status='pending' AND s.send_at <= ? ORDER BY s.send_at`).all(now);
 }
 export function cancelWaScheduled(id) {
