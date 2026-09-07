@@ -216,6 +216,29 @@ der Schlüssel nur im Volume und ist nach dessen Verlust unwiederbringlich weg.
 > Der Launcher (Port 3999) und die macOS-App sind für den lokalen Betrieb gedacht,
 > nicht für Docker.
 
+### Coolify
+
+Für Coolify gibt es eine eigene Compose-Datei, `docker-compose.coolify.yml`. Sie
+kommt ohne `ports:` und `.env` aus – Domains, TLS und Geheimnisse übernimmt Coolify.
+
+1. Neue Ressource → **Docker Compose** → dieses Repo, Compose-Pfad
+   `/docker-compose.coolify.yml`.
+2. Nach dem ersten Speichern unter **Domains** je Service eintragen:
+   `frontend` → `https://mail.tjl-it.de`, `mcp` → `https://mcp.tjl-it.de`
+   (nur wenn MCP über HTTP genutzt wird; sonst den Service löschen). Ist am Server
+   die Wildcard `*.tjl-it.de` hinterlegt, schlägt Coolify sonst `frontend-<id>.tjl-it.de` vor.
+3. Deploy. Coolify erzeugt beim ersten Lauf `MAIL_CRYPTO_KEY`, `MAIL_SETUP_TOKEN`,
+   `MAIL_API_KEY` und `MCP_TOKEN` (Magic-Variablen `SERVICE_HEX_64_CRYPTO`,
+   `SERVICE_PASSWORD_*`) und zeigt sie unter *Environment Variables*. Den
+   Einrichtungs-Schlüssel brauchst du beim ersten Aufruf der UI; den
+   Verschlüsselungs-Schlüssel extern sichern und nie ändern.
+
+Was sonst noch einstellbar ist, steht in `.env.coolify.example` – die Datei ist
+nur die Vorlage zum Hineinkopieren, gelesen wird sie von Coolify nicht.
+`MAIL_ALLOWED_HOSTS`, `MAIL_PUBLIC_URL` und `MCP_ALLOWED_HOSTS` leiten sich
+automatisch aus den Domains ab. Der Weg einer Anfrage ist Traefik → nginx →
+Backend, darum steht `MAIL_TRUST_PROXY=2` in der Compose-Datei.
+
 ## Accounts per Datei (Seed)
 
 Accounts lassen sich zusätzlich zur UI aus einer Datei anlegen. Kopiere die Vorlage

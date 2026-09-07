@@ -17,3 +17,4 @@ backend/accounts.seed.json
 swift/.build/
 # Die Vorlage selbst soll ins Repo (README verweist darauf)
 !.env.example
+!.env.coolify.example
