@@ -230,7 +230,18 @@ function describeMessage(msg) {
   if (inner.contactMessage) return { type: 'contact', body: inner.contactMessage.displayName || null };
   if (inner.reactionMessage) return { type: 'reaction', body: inner.reactionMessage.text || null };
   if (inner.protocolMessage?.type === 0) return { type: 'revoked', body: null };
-  return { type: 'unsupported', body: null };
+  // Runde Video-Notiz („PTV") – technisch ein Video.
+  if (inner.ptvMessage) return { ...pick('video', inner.ptvMessage), body: null };
+  const poll = inner.pollCreationMessageV3 || inner.pollCreationMessageV2 || inner.pollCreationMessage;
+  if (poll) {
+    const opts = (poll.options || []).map(o => o.optionName).filter(Boolean).join(' / ');
+    return { type: 'text', body: `📊 Umfrage: ${poll.name || ''}${opts ? ` (${opts})` : ''}` };
+  }
+  if (inner.editedMessage?.message) return describeMessage({ message: inner.editedMessage.message });
+  // Nur messageContextInfo/senderKeyDistributionMessage: Inhalt (noch) nicht
+  // entschlüsselt. WhatsApp liefert ihn meist mit einer Wiederholung nach –
+  // messages.upsert wertet die dann auf, siehe dort.
+  return { type: 'unsupported', body: null, keys: Object.keys(inner) };
 }
 
 const snippetOf = (type, body) => {
@@ -298,7 +309,8 @@ function toRow(session, msg, { origin = null } = {}) {
     // raw behalten für eigene Nachrichten (Baileys braucht es für
     // Zustell-Wiederholungen) UND für alles mit Medien: ohne das Original kann
     // eine Sprachnachricht später nicht mehr heruntergeladen werden.
-    raw: (msg.key.fromMe || d.media_mime) ? JSON.stringify(msg.message ?? null) : null,
+    // … und bei nicht erkannten Typen, damit sich nachvollziehen lässt, was da kam.
+    raw: (msg.key.fromMe || d.media_mime || d.type === 'unsupported') ? JSON.stringify(msg.message ?? null) : null,
     _msg: msg,
   };
 }
@@ -765,8 +777,23 @@ function wireEvents(session, sock, authDir) {
       const row = toRow(session, msg);
       if (!row) continue;
       const { _msg, ...clean } = row;
-      const added = db.insertWaMessages([clean]);
-      if (!added) continue;
+      // Schon da – aber vielleicht nur als Platzhalter: WhatsApp schickt eine
+      // Nachricht, die beim ersten Mal nicht zu entschlüsseln war, später
+      // erneut mit Inhalt. insertWaMessages wertet den Platzhalter dann auf.
+      let upgradedId = null;
+      const added = db.insertWaMessages([clean], { onUpgrade: id => { upgradedId = id; } });
+      if (!added) {
+        if (upgradedId) {
+          const stored = db.getWaMessage(upgradedId);
+          emit('message', { ...db.getWaChat(stored.chat_id), message: stored });
+          await maybeDownloadMedia(session, row, upgradedId);
+          log(`Platzhalter aufgewertet: #${upgradedId} → ${clean.type}`);
+        }
+        continue;
+      }
+      if (clean.type === 'unsupported') {
+        log(`Nicht erkannter Nachrichtentyp von ${clean.chat_jid}: ${(describeMessage(msg).keys || []).join(', ') || 'leer'}`);
+      }
 
       const stored = db.getWaMessageByWaId(session.id, clean.chat_jid, clean.wa_id);
       if (!clean.from_me) {
@@ -878,8 +905,10 @@ function wireEvents(session, sock, authDir) {
 
   sock.ev.on('contacts.upsert', guard(contacts => saveContacts(contacts)));
 
-  sock.ev.on('messaging-history.set', guard(({ chats, contacts, messages, isLatest, progress }) => {
+  sock.ev.on('messaging-history.set', guard(async ({ chats, contacts, messages, isLatest, progress }) => {
     let added = 0;
+    const upgraded = [];
+    const byWaId = new Map((messages || []).map(m => [m?.key?.id, m]));
     db.tx(() => {
       // Erst die Kontakte (sie tragen lid + Nummer), dann die Chats – so landen
       // die Chats gleich unter der richtigen Kennung.
@@ -900,8 +929,24 @@ function wireEvents(session, sock, authDir) {
         if (row) { const { _msg, ...clean } = row; rows.push(clean); }
       }
       // In Blöcken, damit eine einzelne Transaktion nicht ewig die Schreibsperre hält.
-      for (let i = 0; i < rows.length; i += 500) added += db.insertWaMessages(rows.slice(i, i + 500));
+      for (let i = 0; i < rows.length; i += 500) {
+        added += db.insertWaMessages(rows.slice(i, i + 500), {
+          onUpgrade: id => {
+            const stored = db.getWaMessage(id);
+            if (stored) upgraded.push(stored);
+          },
+        });
+      }
     });
+    // Aufgewertete Platzhalter: Oberfläche informieren und Medien holen.
+    for (const stored of upgraded) {
+      emit('message', { ...db.getWaChat(stored.chat_id), message: stored });
+      const orig = byWaId.get(stored.wa_id);
+      if (orig && stored.media_mime) {
+        await maybeDownloadMedia(session, { ...stored, _msg: orig }, stored.id);
+      }
+      log(`Platzhalter aufgewertet (Verlauf): #${stored.id} → ${stored.type}`);
+    }
     emit('sync', {
       wa_account_id: session.id, phase: 'history',
       progress: progress ?? null, chats: (chats || []).length, messages: added, done: !!isLatest,

@@ -1929,6 +1929,21 @@ export function setWaTranscript(id, { status, text = null, error = null }) {
   }
   return getWaMessage(id);
 }
+/** Platzhalter (type=unsupported) durch die später gelieferte, echte Nachricht ersetzen. */
+export function upgradeWaMessage(id, m) {
+  db.prepare(
+    `UPDATE wa_messages SET type=?, body=?, snippet=?, media_mime=?, media_size=?, media_filename=?,
+       quoted_wa_id=COALESCE(?, quoted_wa_id), sender_name=COALESCE(?, sender_name), raw=?
+     WHERE id=?`)
+    .run(m.type || 'text', m.body ?? null, m.snippet ?? null, m.media_mime ?? null, m.media_size ?? null,
+      m.media_filename ?? null, m.quoted_wa_id ?? null, m.sender_name ?? null, m.raw ?? null, id);
+  const row = getWaMessage(id);
+  if (row) {
+    db.prepare(`UPDATE wa_chats SET last_snippet=? WHERE id=? AND COALESCE(last_message_ts,0) <= ?`)
+      .run(m.snippet ?? null, row.chat_id, row.ts);
+  }
+  return row;
+}
 /** Sprachnachrichten mit Datei, aber ohne Transkript – für Warteschlange und Nachholen. */
 export function waAudioToTranscribe({ sinceTs = 0, limit = 200 } = {}) {
   return db.prepare(
@@ -1938,7 +1953,7 @@ export function waAudioToTranscribe({ sinceTs = 0, limit = 200 } = {}) {
 }
 
 /** Ein Batch Nachrichten. Gibt zurück, wie viele wirklich neu waren. */
-export function insertWaMessages(rows = []) {
+export function insertWaMessages(rows = [], { onUpgrade = null } = {}) {
   if (!rows.length) return 0;
   const stmt = db.prepare(
     `INSERT OR IGNORE INTO wa_messages
@@ -1953,7 +1968,17 @@ export function insertWaMessages(rows = []) {
       m.body ?? null, m.snippet ?? null, m.quoted_wa_id ?? null,
       m.media_mime ?? null, m.media_size ?? null, m.media_filename ?? null, m.stored_path ?? null,
       m.status ?? null, m.origin ?? null, m.raw ?? null);
-    if (r.changes > 0) added++;
+    if (r.changes > 0) { added++; continue; }
+    // Schon vorhanden – war es nur ein Platzhalter (unentschlüsselt), jetzt
+    // aber mit Inhalt geliefert? Dann aufwerten, sonst bleibt alles wie es ist.
+    if (m.type && m.type !== 'unsupported') {
+      const prev = db.prepare('SELECT id, type FROM wa_messages WHERE wa_account_id=? AND chat_jid=? AND wa_id=?')
+        .get(m.wa_account_id, m.chat_jid, m.wa_id);
+      if (prev && prev.type === 'unsupported') {
+        upgradeWaMessage(prev.id, m);
+        if (onUpgrade) onUpgrade(prev.id, m);
+      }
+    }
   }
   return added;
 }
