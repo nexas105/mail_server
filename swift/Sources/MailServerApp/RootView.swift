@@ -285,7 +285,7 @@ struct Sidebar: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.message = "Projekt-Root wählen (enthält src/server.js)"
+        panel.message = "Projekt-Root wählen (enthält backend/src/server.js)"
         if panel.runModal() == .OK, let url = panel.url { store.projectRoot = url.path }
     }
 }

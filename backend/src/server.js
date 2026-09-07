@@ -4,6 +4,7 @@ import { setRestrictiveUmask, hardenDataDir } from './harden.js';
 setRestrictiveUmask();
 
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,7 @@ import { fetchInbox, verifyImap, listMailboxes } from './imap.js';
 import * as gh from './github.js';
 import * as wa from './whatsapp.js';
 import { subscribe, ping as waPing, closeAllStreams } from './wa-bus.js';
+import { ROOT_DIR, STATIC_DIR } from './paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -44,10 +46,15 @@ const LOOPBACK_ONLY = ['127.0.0.1', '::1', 'localhost'].includes(BIND_HOST);
 const ALLOWED_HOSTS = (process.env.MAIL_ALLOWED_HOSTS || '')
   .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
 const DEFAULT_LOCAL_HOSTS = ['localhost', '127.0.0.1', '[::1]', '::1'];
+// Interne Namen, die zusätzlich immer gelten: im Docker-Betrieb sprechen der
+// Healthcheck (127.0.0.1) und der MCP-Container (Dienstname „backend") den
+// Server unter Namen an, die nicht in MAIL_ALLOWED_HOSTS stehen.
+const INTERNAL_HOSTS = (process.env.MAIL_INTERNAL_HOSTS || '')
+  .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
 app.use((req, res, next) => {
   const host = String(req.get('host') || '').toLowerCase().replace(/:\d+$/, '');
   const allowed = ALLOWED_HOSTS.length ? ALLOWED_HOSTS : (LOOPBACK_ONLY ? DEFAULT_LOCAL_HOSTS : null);
-  if (allowed && host && !allowed.includes(host)) {
+  if (allowed && host && !allowed.includes(host) && !INTERNAL_HOSTS.includes(host)) {
     return res.status(421).json({ error: `Host "${host}" ist nicht freigegeben (MAIL_ALLOWED_HOSTS)` });
   }
   next();
@@ -88,7 +95,7 @@ app.use(express.json({ limit: '30mb' }));
 // /api-Routen. Muss VOR den Routen stehen, die geschützt werden sollen.
 installAuth(app);
 
-const projectRoot = path.join(__dirname, '..');
+const projectRoot = ROOT_DIR;
 const mcpPath = path.join(__dirname, 'mcp-server.js');
 
 app.get('/api/info', (req, res) => {
@@ -155,10 +162,13 @@ app.get('/api/health', (req, res) => {
 
 // Gerendertes Fremd-HTML (Vorschau, empfangene Mails) läuft im iframe auf DIESEM
 // Ursprung. Ohne script-src 'none' wäre jede Mail mit <script> ein XSS in der App.
-function sendUntrustedHtml(res, html) {
+// Externe Bilder sind standardmäßig gesperrt (Tracking-Pixel, Lese-Bestätigung
+// an den Absender); nur wenn der Aufrufer sie ausdrücklich freigibt, dürfen
+// https:/http:-Quellen geladen werden.
+function sendUntrustedHtml(res, html, { externalImages = false } = {}) {
   res.set('Content-Security-Policy', [
     "default-src 'none'",
-    "img-src 'self' data: https: http:",
+    externalImages ? "img-src 'self' data: https: http:" : "img-src 'self' data:",
     "style-src 'unsafe-inline' 'self'",
     "font-src 'self' data:",
     "script-src 'none'",
@@ -168,6 +178,44 @@ function sendUntrustedHtml(res, html) {
   ].join('; '));
   res.set('X-Content-Type-Options', 'nosniff');
   res.type('html').send(html);
+}
+
+// Hochgeladene bzw. empfangene Dateien (Assets, Anhänge, WhatsApp-Medien) liegen
+// auf DIESEM Ursprung. Nur harmlose Typen dürfen inline angezeigt werden – alles
+// andere (SVG mit Script, HTML, unbekannte Typen) geht als Download raus, sonst
+// wäre jede fremde Datei ein potenzielles XSS in der App.
+const INLINE_MIME_EXACT = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+  'video/mp4', 'video/webm', 'video/3gpp',
+  'application/pdf',
+]);
+const INLINE_AUDIO_SUBTYPES = new Set(['ogg', 'mpeg', 'mp4', 'aac', 'wav', 'opus', 'webm']);
+function inlineMimeAllowed(mime) {
+  if (INLINE_MIME_EXACT.has(mime)) return true;
+  if (mime.startsWith('audio/')) return INLINE_AUDIO_SUBTYPES.has(mime.slice(6));
+  return false;
+}
+// kind: 'image' | 'audio' | 'video' | … – wenn gesetzt (WhatsApp-Medien), muss
+// der Mime-Typ zur Nachrichtenart passen, sonst ebenfalls nur Download.
+function sendUntrustedFile(res, { path: filePath, mime, kind, filename }) {
+  const clean = String(mime || '').split(';')[0].trim().toLowerCase();
+  const kindOk = !kind || !['image', 'audio', 'video'].includes(kind) || clean.startsWith(kind + '/');
+  const isSvg = clean === 'image/svg+xml';
+  const inline = clean && inlineMimeAllowed(clean) && kindOk;
+  const headers = {
+    'X-Content-Type-Options': 'nosniff',
+    // SVG darf als <img> weiterhin geladen werden, nur nicht als Dokument mit Script laufen.
+    'Content-Security-Policy': isSvg ? "sandbox; script-src 'none'; default-src 'none'" : "sandbox; default-src 'none'",
+  };
+  if (inline) {
+    res.type(clean);
+  } else {
+    res.type(isSvg ? clean : 'application/octet-stream');
+    // Sicherer Dateiname für Content-Disposition (ohne Steuerzeichen/Anführungszeichen)
+    const safeName = String(filename || 'download').replace(/[^\w.\-() ]+/g, '_').slice(0, 120) || 'download';
+    headers['Content-Disposition'] = `attachment; filename="${safeName}"`;
+  }
+  res.sendFile(filePath, { headers });
 }
 
 const wrap = fn => (req, res) => new Promise(resolve => resolve(fn(req, res))).catch(e => {
@@ -409,7 +457,7 @@ app.get('/api/mcp/tools', wrap(async (req, res) => {
 
 // ---- Einstellungen (z.B. default_account_id) ------------------------------
 app.get('/api/settings', wrap((req, res) => res.json(db.getAllSettings())));
-app.put('/api/settings', wrap((req, res) => res.json(db.setSettings(req.body || {}))));
+app.put('/api/settings', requireAdmin, wrap((req, res) => res.json(db.setSettings(req.body || {}))));
 
 // ---- Marken (Brands): Variablen-Presets inkl. Farbe -----------------------
 app.get('/api/brands', wrap((req, res) => res.json(db.listBrands())));
@@ -450,25 +498,26 @@ app.post('/api/assets', assetJson, wrap((req, res) => {
 app.get('/api/assets/:id/file', wrap((req, res) => {
   const a = db.getAsset(+req.params.id);
   if (!a) return res.status(404).send('not found');
-  res.type(a.mimetype).set('Cache-Control', 'public, max-age=31536000, immutable').sendFile(a.stored_path);
+  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  sendUntrustedFile(res, { path: a.stored_path, mime: a.mimetype, filename: a.filename });
 }));
 app.delete('/api/assets/:id', wrap((req, res) => res.json({ ok: db.deleteAsset(+req.params.id) })));
 
 // ---- Accounts -------------------------------------------------------------
 app.get('/api/accounts', wrap((req, res) => res.json(db.listAccounts())));
-app.post('/api/accounts', wrap((req, res) => res.status(201).json(db.createAccount(req.body))));
-app.put('/api/accounts/:id', wrap((req, res) => {
+app.post('/api/accounts', requireAdmin, wrap((req, res) => res.status(201).json(db.createAccount(req.body))));
+app.put('/api/accounts/:id', requireAdmin, wrap((req, res) => {
   const a = db.updateAccount(+req.params.id, req.body);
   if (!a) return res.status(404).json({ error: 'not found' });
   res.json(a);
 }));
-app.delete('/api/accounts/:id', wrap((req, res) => res.json({ ok: db.deleteAccount(+req.params.id) })));
-app.post('/api/accounts/:id/duplicate', wrap((req, res) => {
+app.delete('/api/accounts/:id', requireAdmin, wrap((req, res) => res.json({ ok: db.deleteAccount(+req.params.id) })));
+app.post('/api/accounts/:id/duplicate', requireAdmin, wrap((req, res) => {
   const a = db.duplicateAccount(+req.params.id, req.body?.name);
   if (!a) return res.status(404).json({ error: 'not found' });
   res.status(201).json(a);
 }));
-app.post('/api/accounts/:id/verify', wrap(async (req, res) => {
+app.post('/api/accounts/:id/verify', requireAdmin, wrap(async (req, res) => {
   const a = db.getAccount(+req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
   try { await verifyAccount(a); res.json({ ok: true }); }
@@ -476,7 +525,7 @@ app.post('/api/accounts/:id/verify', wrap(async (req, res) => {
 }));
 
 // CardDAV: Kontakte des Accounts synchronisieren (optional in eine Liste)
-app.post('/api/accounts/:id/carddav/sync', wrap(async (req, res) => {
+app.post('/api/accounts/:id/carddav/sync', requireAdmin, wrap(async (req, res) => {
   const account = db.getAccount(+req.params.id);
   if (!account) return res.status(404).json({ error: 'not found' });
   if (!account.carddav_url) return res.status(400).json({ error: 'Keine CardDAV-URL konfiguriert' });
@@ -494,7 +543,7 @@ app.post('/api/accounts/:id/carddav/sync', wrap(async (req, res) => {
 }));
 
 // IMAP-Zugangsdaten des Accounts prüfen (ohne Mails zu laden)
-app.post('/api/accounts/:id/imap/verify', wrap(async (req, res) => {
+app.post('/api/accounts/:id/imap/verify', requireAdmin, wrap(async (req, res) => {
   const a = db.getAccount(+req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
   if (!a.imap_host) return res.status(400).json({ ok: false, error: 'Kein IMAP-Host konfiguriert' });
@@ -542,7 +591,9 @@ app.get('/api/messages/:id/body.html', wrap((req, res) => {
   const body = m.html
     || (m.text ? `<pre style="font-family:sans-serif;white-space:pre-wrap;margin:0">${m.text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</pre>` : '')
     || '<em style="font-family:sans-serif;color:#888">Kein Inhalt</em>';
-  sendUntrustedHtml(res, body);
+  // Externe Bilder nur auf ausdrücklichen Wunsch (?external=1) – sonst könnte
+  // jeder Absender per Tracking-Pixel sehen, wann die Mail geöffnet wurde.
+  sendUntrustedHtml(res, body, { externalImages: req.query.external === '1' });
 }));
 app.post('/api/messages/:id/seen', wrap((req, res) => res.json({
   ok: db.setMessageSeen(+req.params.id, req.body?.seen !== false),
@@ -608,11 +659,23 @@ app.get('/api/drafts/:id/preview', wrap((req, res) => {
 // Raw rendered HTML for iframe (srcdoc alternative)
 app.get('/api/drafts/:id/preview.html', wrap((req, res) => {
   const p = renderPreview(+req.params.id, req.query.recipient ? +req.query.recipient : null);
-  sendUntrustedHtml(res, p.html || '<em style="font-family:sans-serif;color:#888">Kein HTML-Inhalt</em>');
+  // Eigene Inhalte: externe Bilder (z.B. gehostete Logos) dürfen geladen werden.
+  sendUntrustedHtml(res, p.html || '<em style="font-family:sans-serif;color:#888">Kein HTML-Inhalt</em>', { externalImages: true });
 }));
 
 // Send with live progress over Server-Sent Events
 app.get('/api/drafts/:id/send', wrap(async (req, res) => {
+  // Zustandsändernde GET-Route: Eine Top-Level-Navigation (Link, <iframe>,
+  // <img src>) mit Cookie-Sitzung darf KEINEN Versand auslösen. EventSource
+  // schickt Sec-Fetch-Dest: empty / Sec-Fetch-Mode: cors – alles andere lehnen
+  // wir ab. Fehlt der Header (alte Browser, curl), lassen wir durch: ohne
+  // Cookie kommt so ein Aufruf ohnehin nicht an der Anmeldung vorbei.
+  if (req.auth?.via === 'cookie') {
+    const dest = (req.get('sec-fetch-dest') || '').toLowerCase();
+    if (dest && dest !== 'empty') {
+      return res.status(403).json({ error: 'Versand nur aus der App heraus (kein Aufruf per Navigation/Einbettung)' });
+    }
+  }
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   res.flushHeaders();
   const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -644,12 +707,12 @@ app.get('/api/templates/:id', wrap((req, res) => {
 }));
 app.post('/api/templates', wrap((req, res) => res.status(201).json(db.createTemplate(req.body))));
 // Vorlagen + Custom-Felder aus content.seed.json (nach)laden – idempotent
-app.post('/api/templates/seed', wrap((req, res) => res.json(db.seedContent())));
-app.post('/api/content/seed', wrap((req, res) => res.json(db.seedContent())));
+app.post('/api/templates/seed', requireAdmin, wrap((req, res) => res.json(db.seedContent())));
+app.post('/api/content/seed', requireAdmin, wrap((req, res) => res.json(db.seedContent())));
 // Aktuellen Stand als JSON zurückgeben (Download/Ansehen)
 app.get('/api/content/export', wrap((req, res) => res.json(db.contentSnapshot())));
 // Aktuellen Stand nach content.seed.json schreiben (zum Committen/Versionieren)
-app.post('/api/content/export', wrap((req, res) => res.json(db.exportContent())));
+app.post('/api/content/export', requireAdmin, wrap((req, res) => res.json(db.exportContent())));
 app.put('/api/templates/:id', wrap((req, res) => {
   const t = db.updateTemplate(+req.params.id, req.body);
   if (!t) return res.status(404).json({ error: 'not found' });
@@ -674,6 +737,10 @@ app.delete('/api/attachments/:id', wrap((req, res) => res.json({ ok: db.deleteAt
 app.get('/api/attachments/:id/download', wrap((req, res) => {
   const a = db.getAttachment(+req.params.id);
   if (!a) return res.status(404).json({ error: 'not found' });
+  // Download erzwingt bereits Content-Disposition: attachment; nosniff + CSP
+  // zusätzlich, falls ein Browser die Datei doch inline öffnet.
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Content-Security-Policy', "sandbox; default-src 'none'");
   res.download(a.stored_path, a.filename);
 }));
 
@@ -755,21 +822,21 @@ app.get('/api/lists/:id/export.vcf', wrap((req, res) => {
 // ---- GitHub-Verbindungen --------------------------------------------------
 // Das Token verlässt den Server nie: listGithubConnections liefert nur has_token.
 app.get('/api/github/connections', wrap((req, res) => res.json(db.listGithubConnections())));
-app.post('/api/github/connections', wrap((req, res) => {
+app.post('/api/github/connections', requireAdmin, wrap((req, res) => {
   if (!req.body?.token) throw new Error('Token erforderlich');
   res.status(201).json(db.createGithubConnection(req.body));
 }));
-app.put('/api/github/connections/:id', wrap((req, res) => {
+app.put('/api/github/connections/:id', requireAdmin, wrap((req, res) => {
   const c = db.updateGithubConnection(+req.params.id, req.body || {});
   if (!c) return res.status(404).json({ error: 'not found' });
   res.json(c);
 }));
-app.delete('/api/github/connections/:id', wrap((req, res) =>
+app.delete('/api/github/connections/:id', requireAdmin, wrap((req, res) =>
   res.json({ ok: db.deleteGithubConnection(+req.params.id) })));
-app.post('/api/github/connections/:id/default', wrap((req, res) =>
+app.post('/api/github/connections/:id/default', requireAdmin, wrap((req, res) =>
   res.json(db.setDefaultGithubConnection(+req.params.id))));
 
-app.post('/api/github/connections/:id/verify', wrap(async (req, res) => {
+app.post('/api/github/connections/:id/verify', requireAdmin, wrap(async (req, res) => {
   const id = +req.params.id;
   if (!db.getGithubConnection(id)) return res.status(404).json({ error: 'not found' });
   try {
@@ -790,7 +857,7 @@ app.get('/api/github/connections/:id/repos', wrap(async (req, res) => {
 }));
 
 // Alle Verknüpfungen dieser Verbindung neu auflösen (heilt Umbenennungen).
-app.post('/api/github/connections/:id/sync', wrap(async (req, res) => {
+app.post('/api/github/connections/:id/sync', requireAdmin, wrap(async (req, res) => {
   const conn = db.getGithubConnection(+req.params.id);
   if (!conn) return res.status(404).json({ error: 'not found' });
   const creds = db.getGithubToken(conn);
@@ -857,14 +924,14 @@ app.get('/api/whatsapp/accounts', wrap((req, res) => res.json(wa.listSessions())
 // Volle Konto-Zeilen inkl. Regeln (mcp_send_mode, Stundenlimit) für die Einstellungen.
 // Muss vor /accounts/:id stehen, sonst schluckt der Parameter das Wort "settings".
 app.get('/api/whatsapp/accounts/settings', wrap((req, res) => res.json(db.listWaAccounts())));
-app.post('/api/whatsapp/accounts', wrap((req, res) =>
+app.post('/api/whatsapp/accounts', requireAdmin, wrap((req, res) =>
   res.status(201).json(db.createWaAccount(req.body || {}))));
-app.put('/api/whatsapp/accounts/:id', wrap((req, res) => {
+app.put('/api/whatsapp/accounts/:id', requireAdmin, wrap((req, res) => {
   const a = db.updateWaAccount(+req.params.id, req.body || {});
   if (!a) return res.status(404).json({ error: 'not found' });
   res.json(a);
 }));
-app.delete('/api/whatsapp/accounts/:id', wrap(async (req, res) => {
+app.delete('/api/whatsapp/accounts/:id', requireAdmin, wrap(async (req, res) => {
   await wa.stopSession(+req.params.id).catch(() => {});
   res.json({ ok: db.deleteWaAccount(+req.params.id) });
 }));
@@ -873,30 +940,30 @@ app.get('/api/whatsapp/accounts/:id/status', wrap((req, res) => {
   if (!s) return res.status(404).json({ error: 'not found' });
   res.json(s);
 }));
-app.post('/api/whatsapp/accounts/:id/connect', wrap(async (req, res) => {
+app.post('/api/whatsapp/accounts/:id/connect', requireAdmin, wrap(async (req, res) => {
   const { method, phone } = req.body || {};
   if (method === 'pairing' && !phone) throw new Error('Für den Kopplungs-Code wird die Telefonnummer gebraucht');
   // Antwortet sofort – QR bzw. Code kommen über den Live-Stream.
   res.json(await wa.startSession(+req.params.id, { method: method || 'qr', phone }));
 }));
-app.post('/api/whatsapp/accounts/:id/disconnect', wrap(async (req, res) =>
+app.post('/api/whatsapp/accounts/:id/disconnect', requireAdmin, wrap(async (req, res) =>
   res.json(await wa.stopSession(+req.params.id))));
-app.post('/api/whatsapp/accounts/:id/logout', wrap(async (req, res) =>
+app.post('/api/whatsapp/accounts/:id/logout', requireAdmin, wrap(async (req, res) =>
   res.json(await wa.stopSession(+req.params.id, { logout: true }))));
 // Harter Reset: löscht die Kopplung lokal, ohne WhatsApp fragen zu müssen.
 // Der Ausweg, wenn die Sitzung in einem kaputten Zustand feststeckt.
-app.post('/api/whatsapp/accounts/:id/reset', wrap(async (req, res) =>
+app.post('/api/whatsapp/accounts/:id/reset', requireAdmin, wrap(async (req, res) =>
   res.json(await wa.resetSession(+req.params.id))));
 // Telefonbuch-Namen erneut anfordern (kommen sonst nur einmal beim Koppeln).
-app.post('/api/whatsapp/accounts/:id/resync-contacts', wrap(async (req, res) =>
+app.post('/api/whatsapp/accounts/:id/resync-contacts', requireAdmin, wrap(async (req, res) =>
   res.json(await wa.resyncContacts(+req.params.id))));
 // Gruppennamen und Teilnehmer für alle Gruppen auf einmal holen.
-app.post('/api/whatsapp/accounts/:id/sync-groups', wrap(async (req, res) =>
+app.post('/api/whatsapp/accounts/:id/sync-groups', requireAdmin, wrap(async (req, res) =>
   res.json(await wa.syncAllGroups(+req.params.id))));
 // Belegter Platz + Aufräumen von Hand anstoßen.
 app.get('/api/whatsapp/media-usage', wrap((req, res) =>
   res.json(db.waMediaUsage(req.query.account_id ? +req.query.account_id : null))));
-app.post('/api/whatsapp/accounts/:id/cleanup-media', wrap((req, res) =>
+app.post('/api/whatsapp/accounts/:id/cleanup-media', requireAdmin, wrap((req, res) =>
   res.json(wa.cleanupMedia(+req.params.id))));
 
 // Live-Stream. Bewusst OHNE wrap(): die Header sind längst raus, ein
@@ -1038,7 +1105,7 @@ app.get('/api/whatsapp/messages/:id/media', wrap(async (req, res) => {
       return res.status(410).json({ error: e.message });
     }
   }
-  res.type(m.media_mime || 'application/octet-stream').sendFile(m.stored_path);
+  sendUntrustedFile(res, { path: m.stored_path, mime: m.media_mime, kind: m.type, filename: m.media_filename });
 }));
 app.post('/api/whatsapp/messages/:id/download-media', wrap(async (req, res) =>
   res.json(await wa.downloadMessageMedia(+req.params.id))));
@@ -1069,12 +1136,18 @@ app.delete('/api/whatsapp/contacts/:id/link', wrap((req, res) =>
 app.get('/api/contacts/:id/whatsapp', wrap((req, res) =>
   res.json(db.waContactsForContact(+req.params.id))));
 
-const distDir = path.join(__dirname, '..', 'frontend', 'dist');
-app.use(express.static(distDir));
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/')) return next();
-  res.sendFile(path.join(distDir, 'index.html'), err => err && next());
-});
+// Frontend-Build ausliefern, falls vorhanden. Im Docker-Betrieb übernimmt das
+// nginx – dann fehlt das Verzeichnis, und der Server bleibt reine API.
+const distDir = STATIC_DIR;
+if (fs.existsSync(path.join(distDir, 'index.html'))) {
+  app.use(express.static(distDir));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    res.sendFile(path.join(distDir, 'index.html'), err => err && next());
+  });
+} else {
+  console.error(`Kein Frontend-Build unter ${distDir} – UI wird von hier nicht ausgeliefert`);
+}
 
 // Letzte Instanz: alles, was aus einer Route herausfliegt, wird hier zu JSON.
 // Express' Standard-Seite würde den Stacktrace ausliefern – auf einem Server

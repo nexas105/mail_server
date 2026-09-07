@@ -29,7 +29,7 @@ final class Supervisor: ObservableObject {
         guard ensureRoot() else { return }
         if backendProc?.isRunning == true { return }
         appendLog(.backend, "▶ Starte Backend …")
-        backendProc = run("cd '\(projectRoot)' && exec node src/server.js", service: .backend)
+        backendProc = run("cd '\(projectRoot)' && exec node backend/src/server.js", service: .backend)
     }
     func stopBackend() {
         if let p = backendProc, p.isRunning { appendLog(.backend, "■ Stoppe Backend …"); p.terminate() }
@@ -71,8 +71,8 @@ final class Supervisor: ObservableObject {
 
     // MARK: - Prozess-Helfer
     private func ensureRoot() -> Bool {
-        if projectRoot.isEmpty || !FileManager.default.fileExists(atPath: projectRoot + "/src/server.js") {
-            appendLog(.backend, "✗ Projektpfad ungültig (src/server.js nicht gefunden). Bitte in der Seitenleiste wählen.")
+        if projectRoot.isEmpty || !FileManager.default.fileExists(atPath: projectRoot + "/backend/src/server.js") {
+            appendLog(.backend, "✗ Projektpfad ungültig (backend/src/server.js nicht gefunden). Bitte in der Seitenleiste wählen.")
             return false
         }
         return true

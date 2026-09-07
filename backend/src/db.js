@@ -2,10 +2,9 @@ import { DatabaseSync } from 'node:sqlite';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { assertSafeUrl } from './net-guard.js';
+import { DATA_DIR, CONTENT_SEED_FILE, ACCOUNTS_SEED_FILE } from './paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---- Encryption key (AES-256-GCM) ----------------------------------------
@@ -274,8 +273,17 @@ export function recordOpen(token, { client = null } = {}) {
   return fresh;
 }
 
-/** Der zuletzt gesendete Empfänger mit dieser Adresse – Ziel einer Bounce-Meldung. */
-export function findSentRecipient({ email, messageId = null, draftId = null }) {
+/**
+ * Der gesendete Empfänger, auf den sich eine Bounce-Meldung bezieht.
+ * Reihenfolge: eigene Empfänger-ID (X-Relay-Recipient) → Message-ID → zuletzt
+ * gesendete Mail an die Adresse. Nur Datensätze mit sent_at, damit eine
+ * Meldung nie einen noch nicht versendeten Empfänger trifft.
+ */
+export function findSentRecipient({ email, messageId = null, draftId = null, recipientId = null }) {
+  if (recipientId != null && Number.isInteger(Number(recipientId))) {
+    const byRecipient = db.prepare('SELECT * FROM recipients WHERE id = ? AND sent_at IS NOT NULL').get(Number(recipientId));
+    if (byRecipient) return byRecipient;
+  }
   if (messageId) {
     const byId = db.prepare('SELECT * FROM recipients WHERE message_id = ? ORDER BY id DESC').get(messageId);
     if (byId) return byId;
@@ -332,6 +340,8 @@ export function getAccount(id) {
   return db.prepare('SELECT * FROM accounts WHERE id = ?').get(id);
 }
 export function createAccount(a) {
+  // Die CardDAV-URL bekommt später das Passwort per Basic-Auth – kein internes Ziel.
+  if (a.carddav_url) assertSafeUrl(a.carddav_url, { purpose: 'CardDAV' });
   const r = db.prepare(`INSERT INTO accounts (name, host, port, secure, username, password_enc, from_name, from_email, reply_to, carddav_url, carddav_username, carddav_password_enc, imap_host, imap_port, imap_secure, imap_username, imap_password_enc, default_header_template_id, default_footer_template_id)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     a.name, a.host, a.port ?? 587, a.secure ? 1 : 0, a.username,
@@ -345,6 +355,27 @@ export function createAccount(a) {
 export function updateAccount(id, a) {
   const cur = getAccount(id);
   if (!cur) return null;
+  if (a.carddav_url) assertSafeUrl(a.carddav_url, { purpose: 'CardDAV' });
+
+  // Wechselt der Server, muss das zugehörige Passwort im selben Aufruf neu
+  // eingegeben werden. Sonst könnte ein Host-Wechsel plus „Prüfen“ das
+  // gespeicherte Passwort an einen fremden Server schicken.
+  const changed = (key, norm = v => v) => a[key] !== undefined && norm(a[key]) !== norm(cur[key]);
+  const nullable = v => (v == null || v === '' ? null : String(v));
+  const flag = v => (v ? 1 : 0);
+  const num = v => (v == null || v === '' ? null : Number(v));
+  if (changed('host', String) || changed('port', num) || changed('secure', flag)) {
+    if (!a.password) throw new Error('Beim Wechsel des SMTP-Servers muss das Passwort neu eingegeben werden');
+  }
+  const imapHostAfter = a.imap_host !== undefined ? nullable(a.imap_host) : cur.imap_host;
+  if (imapHostAfter && (changed('imap_host', nullable) || changed('imap_port', num) || changed('imap_secure', v => (v == null ? null : flag(v))))) {
+    // Gilt auch, wenn bisher kein eigenes IMAP-Passwort hinterlegt war: der
+    // Rückfall auf das SMTP-Passwort ist genau die Lücke.
+    if (!a.imap_password) throw new Error('Beim Wechsel des IMAP-Servers muss das IMAP-Passwort neu eingegeben werden');
+  }
+  if (nullable(a.carddav_url !== undefined ? a.carddav_url : cur.carddav_url) && changed('carddav_url', nullable)) {
+    if (!a.carddav_password) throw new Error('Beim Wechsel der CardDAV-Adresse muss das CardDAV-Passwort neu eingegeben werden');
+  }
   db.prepare(`UPDATE accounts SET name=?, host=?, port=?, secure=?, username=?, password_enc=?, from_name=?, from_email=?, reply_to=?, carddav_url=?, carddav_username=?, carddav_password_enc=?, imap_host=?, imap_port=?, imap_secure=?, imap_username=?, imap_password_enc=?, default_header_template_id=?, default_footer_template_id=? WHERE id=?`).run(
     a.name ?? cur.name, a.host ?? cur.host, a.port ?? cur.port,
     (a.secure ?? cur.secure) ? 1 : 0, a.username ?? cur.username,
@@ -1065,11 +1096,11 @@ export function hasSuccessfulTestSend(draftId) {
 }
 
 // ---- Seeding --------------------------------------------------------------
-// Reads accounts from a JSON file (default: accounts.seed.json in project root)
+// Reads accounts from a JSON file (default: backend/accounts.seed.json, see paths.js)
 // and inserts any that don't exist yet (matched by name). Existing accounts —
 // including ones edited in the UI — are never overwritten.
 // NOTE: uses console.error (not console.log) so it never corrupts MCP stdio.
-export function seedAccounts(file = process.env.SEED_FILE || path.join(__dirname, '..', 'accounts.seed.json')) {
+export function seedAccounts(file = ACCOUNTS_SEED_FILE) {
   if (!fs.existsSync(file)) return { added: 0, skipped: 0 };
   let entries;
   try {
@@ -1188,8 +1219,6 @@ const STARTER_CUSTOM_FIELDS = [
   { field_key: 'rabatt', label: 'Rabatt', default_value: '' },
   { field_key: 'datum', label: 'Datum', default_value: '' },
 ];
-
-const CONTENT_SEED_FILE = process.env.CONTENT_SEED_FILE || path.join(__dirname, '..', 'content.seed.json');
 
 // Vorlagen + globale Custom-Felder aus content.seed.json laden (idempotent).
 // Existiert die Datei nicht, wird sie aus den eingebauten Defaults erzeugt –

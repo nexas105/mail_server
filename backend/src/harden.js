@@ -12,10 +12,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, '..', 'data');
+import { DATA_DIR } from './paths.js';
 
 const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;

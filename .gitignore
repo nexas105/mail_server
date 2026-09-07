@@ -6,11 +6,14 @@ data/
 .DS_Store
 data_server.log
 
-# Echte SMTP-Zugangsdaten – niemals committen. Vorlage: accounts.seed.example.json
+# Echte SMTP-Zugangsdaten – niemals committen. Vorlage: backend/accounts.seed.example.json
 accounts.seed.json
+backend/accounts.seed.json
 .env
 *.env.local
 *.env
 *.env.*
 # Swift-Build-Artefakte
 swift/.build/
+# Die Vorlage selbst soll ins Repo (README verweist darauf)
+!.env.example

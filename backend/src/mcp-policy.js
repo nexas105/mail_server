@@ -15,6 +15,17 @@ const list = value => String(value || '').split(',').map(s => s.trim()).filter(B
 // Nur-Lesen-Betrieb: erlaubt sind Werkzeuge, die nichts verändern und nichts senden.
 const READ_PREFIXES = ['list_', 'get_', 'search_', 'preview_', 'read_'];
 
+// Ausnahmen von der Präfix-Regel: Werkzeuge, die trotz Lese-Namens schreiben,
+// senden oder Dateien anlegen. Ein Name ist nur eine Konvention – wer ein neues
+// get_-Werkzeug mit Seiteneffekt baut, trägt es HIER ein, sonst bekommt es ein
+// nur-lesendes Token angeboten.
+// Stand der Prüfung (alle list_/get_/search_/preview_/read_-Werkzeuge in
+// mcp-tools.js und mcp-context-tools.js): keines schreibt. get_message
+// markierte früher ungefragt als gelesen; das tut es nur noch mit
+// mark_seen=true und nie in einer nur-lesenden Sitzung – deshalb steht es
+// nicht hier, sonst könnte ein Lese-Token gar keine Mail mehr lesen.
+export const WRITE_DESPITE_PREFIX = new Set([]);
+
 export const policy = {
   transport: 'stdio',
   readonly: process.env.MCP_READONLY === '1',
@@ -46,11 +57,12 @@ export function localFilesAllowed() {
 export function assertToolAllowed(name, session = {}) {
   if (policy.enabledTools.size && !policy.enabledTools.has(name)) return false;
   if (policy.disabledTools.has(name)) return false;
-  if ((policy.readonly || session.readonly) && !READ_PREFIXES.some(p => name.startsWith(p))) return false;
+  if ((policy.readonly || session.readonly) && !isReadTool(name)) return false;
   return true;
 }
 
-export const isReadTool = name => READ_PREFIXES.some(p => name.startsWith(p));
+export const isReadTool = name =>
+  !WRITE_DESPITE_PREFIX.has(name) && READ_PREFIXES.some(p => name.startsWith(p));
 
 /**
  * Prüft einen Datei-Pfad für Anhänge. Gibt den aufgelösten Pfad zurück oder

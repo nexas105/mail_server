@@ -6,6 +6,7 @@ import {
   getAllSettings, setRecipientToken,
 } from './db.js';
 import { newTrackingToken, withPixel, trackingBaseUrl, opensEnabledGlobally } from './tracking.js';
+import { isPrivateHost } from './net-guard.js';
 
 // Umschließt das fertige Mail-HTML mit einem mobil-optimierten Dokument:
 // viewport (Gerätebreite statt Schrumpfen), fluide Bilder und ein stabiler
@@ -75,19 +76,31 @@ const transports = new Map();
 function transportFor(account) {
   const key = `${account.id}:${account.host}:${account.port}:${account.username}`;
   if (transports.has(key)) return transports.get(key);
+  const secure = !!account.secure; // true for 465, false for 587/STARTTLS
   const t = nodemailer.createTransport({
     host: account.host,
     port: account.port,
-    secure: !!account.secure, // true for 465, false for 587/STARTTLS
+    secure,
+    // STARTTLS erzwingen – sonst gehen Passwort und Mails im Klartext raus,
+    // sobald jemand auf dem Weg das STARTTLS-Angebot unterdrückt. Nur für
+    // lokale/private Server bleibt es opportunistisch (Testrelays ohne TLS).
+    requireTLS: !secure && !isPrivateHost(account.host),
     auth: { user: account.username, pass: decrypt(account.password_enc) },
   });
   transports.set(key, t);
   return t;
 }
 
+/** Adressobjekt für nodemailer – das übernimmt Quoting/Encoding des Namens,
+ *  statt dass ein Name mit Anführungszeichen oder „<“ den Header zerlegt. */
+const addr = r => (r.name ? { name: r.name, address: r.email } : r.email);
+
 export function fromHeader(account) {
-  return account.from_name ? `"${account.from_name}" <${account.from_email}>` : account.from_email;
+  return addr({ name: account.from_name, email: account.from_email });
 }
+
+/** Genau EINE Adresse – keine Listen, keine Display-Namen. */
+const SINGLE_EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 
 // Replace {{name}}, {{email}} and any {{field}} from the vars object.
 export function personalize(str, vars) {
@@ -151,6 +164,8 @@ export function recipientVars(r, defaults = {}, draftVars = {}) {
 // To-Empfängers, sonst Standardwerte) an eine beliebige Adresse. Verändert
 // weder Empfänger-Status noch Entwurfs-Status.
 export async function sendTestMail(draftId, toEmail) {
+  toEmail = String(toEmail ?? '').trim();
+  if (!SINGLE_EMAIL_RE.test(toEmail)) throw new Error('Testadresse muss genau eine gültige E-Mail-Adresse sein');
   const draft = getDraft(draftId);
   if (!draft) throw new Error('Draft not found');
   if (!draft.account_id) throw new Error('Kein SMTP-Account gewählt');
@@ -277,7 +292,6 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
   const base = { ...defaults, ...draftVars }; // für single-mode (ohne Empfängerkontext)
   let sent = 0, failed = 0;
 
-  const addr = r => (r.name ? { name: r.name, address: r.email } : r.email);
   const logEv = (r, status, extra = {}) => logSendEvent({
     draft_id: draftId, draft_subject: draft.subject, account_email: account.from_email,
     email: r.email, name: r.name, kind: r.kind, status, attempt, ...extra,

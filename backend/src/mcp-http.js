@@ -114,8 +114,22 @@ export async function startHttpServer() {
   app.use(PATH_, express.json({ limit: BODY_LIMIT }));
 
   // ---- Sitzungen ----------------------------------------------------------
-  /** sessionId → { transport, server, lastSeen } */
+  /** sessionId → { transport, server, lastSeen, tokenId, tokenName } */
   const sessions = new Map();
+
+  // Eine Sitzung gehört dem Token, das sie eröffnet hat. Ohne diese Prüfung
+  // reichte irgendein gültiges Token plus eine erratene/abgefangene Session-ID,
+  // um in einer fremden Sitzung weiterzuarbeiten – etwa ein nur-lesendes Token
+  // in der Sitzung eines Voll-Tokens, denn die Werkzeugliste wurde beim
+  // Anlegen der Sitzung festgelegt, nicht je Anfrage.
+  const sessionOwner = auth => ({ tokenId: auth?.tokenId ?? null, tokenName: auth?.tokenName ?? null });
+  const ownsSession = (auth, entry) => {
+    const a = sessionOwner(auth);
+    // UI-Token: die Datenbank-ID ist eindeutig. MCP_TOKEN/anonym haben keine ID –
+    // dort muss der (feste) Name übereinstimmen.
+    if (entry.tokenId != null || a.tokenId != null) return entry.tokenId === a.tokenId;
+    return entry.tokenName === a.tokenName;
+  };
 
   async function closeSession(id, reason) {
     const entry = sessions.get(id);
@@ -144,6 +158,10 @@ export async function startHttpServer() {
       // Bestehende Sitzung
       if (sessionId && sessions.has(sessionId)) {
         const entry = sessions.get(sessionId);
+        if (!ownsSession(req.mcpAuth, entry)) {
+          log(`Sitzung ${sessionId.slice(0, 8)}… mit fremdem Token angefragt (${req.mcpAuth?.tokenName || '?'}) – abgewiesen`);
+          return res.status(403).json({ jsonrpc: '2.0', error: { code: -32003, message: 'Session belongs to another token' }, id: null });
+        }
         entry.lastSeen = Date.now();
         await entry.transport.handleRequest(req, res, req.body);
         if (req.method === 'DELETE') await closeSession(sessionId, 'Client-Abmeldung');
@@ -174,7 +192,7 @@ export async function startHttpServer() {
         allowedHosts,
         allowedOrigins,
         onsessioninitialized: id => {
-          sessions.set(id, { transport, server, lastSeen: Date.now() });
+          sessions.set(id, { transport, server, lastSeen: Date.now(), ...sessionOwner(req.mcpAuth) });
           log(`Sitzung ${id.slice(0, 8)}… geöffnet (${sessions.size}/${MAX_SESSIONS})`);
         },
         onsessionclosed: id => closeSession(id, 'Transport geschlossen'),

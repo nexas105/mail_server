@@ -11,7 +11,6 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import makeWASocket, {
   useMultiFileAuthState, makeCacheableSignalKeyStore, fetchLatestBaileysVersion,
   DisconnectReason, Browsers, downloadMediaMessage, jidNormalizedUser, isJidGroup,
@@ -20,9 +19,9 @@ import pino from 'pino';
 import qrcode from 'qrcode-generator';
 import * as db from './db.js';
 import { emit } from './wa-bus.js';
+import { DATA_DIR } from './paths.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WA_DIR = path.join(__dirname, '..', 'data', 'whatsapp');
+const WA_DIR = path.join(DATA_DIR, 'whatsapp');
 const MEDIA_DIR = path.join(WA_DIR, 'media');
 
 // Pino MUSS auf stderr schreiben: der Launcher greift stdout des Servers ab,
