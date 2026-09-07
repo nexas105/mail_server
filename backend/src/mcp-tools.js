@@ -1071,6 +1071,62 @@ tool(
   },
 );
 
+const schedView = r => ({
+  scheduled_id: r.id, chat_id: r.chat_id, chat: r.chat_name || r.chat_jid,
+  send_at: new Date(r.send_at * 1000).toISOString(), status: r.status,
+  text: r.text, note: r.note, origin: r.origin, error: r.error || null,
+  sent_at: r.sent_at || null, wa_id: r.wa_id || null,
+});
+
+tool(
+  'schedule_wa_message',
+  'PLANT eine WhatsApp-Nachricht: Text jetzt, Versand zu einem Zeitpunkt in der Zukunft. Der Web-Server '
+  + 'schickt sie dann von selbst (er muss zu dem Zeitpunkt laufen und das Konto verbunden sein). Bis dahin '
+  + 'lässt sie sich mit cancel_wa_scheduled zurückziehen oder in der Oberfläche ändern. Dieselben Regeln wie '
+  + 'send_wa_message: Empfänger und Wortlaut müssen vom Nutzer bestätigt sein.',
+  {
+    chat_id: z.number().int().describe('Aus list_wa_chats'),
+    text: z.string(),
+    send_at: z.string().describe('ISO-8601 mit Zeitzone, z.B. 2026-09-11T18:00:00+02:00 – oder Unix-Sekunden'),
+    note: z.string().optional().describe('Merkzettel für den Nutzer, z.B. "Freitag: nach ihrer Woche fragen"'),
+  },
+  async ({ chat_id, text, send_at, note }) => {
+    try {
+      const row = await ui(`/api/whatsapp/chats/${chat_id}/scheduled`, {
+        method: 'POST', body: { text, send_at, note },
+      });
+      return ok({ ...schedView(row), open_in_ui: `${LINK}/whatsapp` });
+    } catch (e) {
+      return ok({ error: e.message, open_in_ui: `${LINK}/whatsapp` });
+    }
+  },
+);
+
+tool(
+  'list_wa_scheduled',
+  'Geplante WhatsApp-Nachrichten: offene zuerst (nach Sendezeit), danach die zuletzt gesendeten, '
+  + 'gescheiterten und zurückgezogenen.',
+  {
+    chat_id: z.number().int().optional(),
+    account_id: z.number().int().optional(),
+    status: z.enum(['pending', 'sent', 'failed', 'cancelled']).optional(),
+    limit: z.number().int().optional().default(50),
+  },
+  async ({ chat_id, account_id, status, limit }) => ok(
+    db.listWaScheduled({ chatId: chat_id ?? null, waAccountId: account_id ?? null, status: status ?? null, limit })
+      .map(schedView)),
+);
+
+tool(
+  'cancel_wa_scheduled',
+  'Zieht eine geplante WhatsApp-Nachricht zurück, solange sie noch nicht gesendet ist.',
+  { scheduled_id: z.number().int() },
+  async ({ scheduled_id }) => {
+    try { return ok(schedView(await ui(`/api/whatsapp/scheduled/${scheduled_id}`, { method: 'DELETE' }))); }
+    catch (e) { return ok({ error: e.message }); }
+  },
+);
+
 tool(
   'mark_wa_chat_read',
   'Setzt einen Chat auf gelesen und schickt Lesebestätigungen.',

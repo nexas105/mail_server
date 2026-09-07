@@ -380,6 +380,8 @@ nicht auf.
 | `reply_to_message` | Antwort-Entwurf auf eine empfangene Mail (mit Zitat) |
 | `list_contacts` / `list_lists` / `add_contact` | Kontakte & Listen |
 | `sync_inbox` / `list_inbox` / `get_message` | Posteingang per IMAP abrufen & lesen |
+| `send_wa_message` / `schedule_wa_message` | WhatsApp sofort senden bzw. für einen Zeitpunkt einplanen (nur mit `MAIL_WA_MCP_SEND=1`) |
+| `list_wa_scheduled` / `cancel_wa_scheduled` | Geplante WhatsApp-Nachrichten einsehen und zurückziehen |
 
 Die vollständige, immer aktuelle Liste steht in der Web-UI unter **Anleitung** –
 sie liest sie über `GET /api/mcp/tools` direkt aus dem laufenden Server.

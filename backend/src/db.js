@@ -2101,3 +2101,85 @@ export function waUnreadCount(waAccountId = null) {
     ? db.prepare('SELECT COALESCE(SUM(unread),0) AS n FROM wa_chats WHERE wa_account_id=?').get(waAccountId).n
     : db.prepare('SELECT COALESCE(SUM(unread),0) AS n FROM wa_chats').get().n;
 }
+
+/* ---- Geplante WhatsApp-Nachrichten --------------------------------------- */
+// Ein Auftrag, keine Nachricht: er steht hier, bis der Web-Server-Prozess ihn
+// zur Sendezeit ausführt (der Socket lebt nur dort, siehe src/whatsapp.js).
+// Der MCP-Prozess legt Aufträge über HTTP an, damit dieselben Schutzregeln
+// greifen wie beim Sofortversand.
+db.exec(`
+CREATE TABLE IF NOT EXISTS wa_scheduled (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  wa_account_id INTEGER NOT NULL REFERENCES wa_accounts(id) ON DELETE CASCADE,
+  chat_id INTEGER NOT NULL REFERENCES wa_chats(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  send_at INTEGER NOT NULL,                  -- Unix-Sekunden
+  status TEXT NOT NULL DEFAULT 'pending',    -- pending|sent|failed|cancelled
+  origin TEXT NOT NULL DEFAULT 'ui',         -- ui|mcp
+  note TEXT,                                 -- Merkzettel, z.B. wofür die Nachricht ist
+  wa_id TEXT,                                -- nach dem Versand
+  error TEXT,                                -- letzter Fehler (auch bei pending: Versuch fehlgeschlagen)
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_wa_scheduled_due ON wa_scheduled(status, send_at);
+`);
+
+const WA_SCHED_COLS = `s.*, c.name AS chat_name, c.jid AS chat_jid, c.is_group`;
+
+export function createWaScheduled({ wa_account_id, chat_id, text, send_at, origin = 'ui', note = null }) {
+  const info = db.prepare(
+    `INSERT INTO wa_scheduled (wa_account_id, chat_id, text, send_at, origin, note)
+     VALUES (?, ?, ?, ?, ?, ?)`).run(wa_account_id, chat_id, text, send_at, origin, note);
+  return getWaScheduled(info.lastInsertRowid);
+}
+export function getWaScheduled(id) {
+  return db.prepare(
+    `SELECT ${WA_SCHED_COLS} FROM wa_scheduled s JOIN wa_chats c ON c.id = s.chat_id WHERE s.id=?`).get(id);
+}
+/**
+ * Offene Aufträge zuerst (nach Sendezeit), danach die zuletzt erledigten –
+ * so sieht man in der Oberfläche, was ansteht UND was gerade rausging.
+ */
+export function listWaScheduled({ waAccountId = null, chatId = null, status = null, limit = 50 } = {}) {
+  const where = []; const args = [];
+  if (waAccountId) { where.push('s.wa_account_id=?'); args.push(waAccountId); }
+  if (chatId) { where.push('s.chat_id=?'); args.push(chatId); }
+  if (status) { where.push('s.status=?'); args.push(status); }
+  args.push(limit);
+  return db.prepare(
+    `SELECT ${WA_SCHED_COLS} FROM wa_scheduled s JOIN wa_chats c ON c.id = s.chat_id
+     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+     ORDER BY CASE s.status WHEN 'pending' THEN 0 ELSE 1 END, 
+              CASE s.status WHEN 'pending' THEN s.send_at ELSE -s.send_at END
+     LIMIT ?`).all(...args);
+}
+export function dueWaScheduled(now = Math.floor(Date.now() / 1000)) {
+  return db.prepare(
+    `SELECT ${WA_SCHED_COLS} FROM wa_scheduled s JOIN wa_chats c ON c.id = s.chat_id
+     WHERE s.status='pending' AND s.send_at <= ? ORDER BY s.send_at`).all(now);
+}
+export function cancelWaScheduled(id) {
+  const r = db.prepare(`UPDATE wa_scheduled SET status='cancelled' WHERE id=? AND status='pending'`).run(id);
+  return r.changes > 0;
+}
+export function updateWaScheduled(id, { text, send_at, note } = {}) {
+  const cur = db.prepare('SELECT * FROM wa_scheduled WHERE id=?').get(id);
+  if (!cur || cur.status !== 'pending') return null;
+  db.prepare('UPDATE wa_scheduled SET text=?, send_at=?, note=? WHERE id=?').run(
+    text ?? cur.text, send_at ?? cur.send_at, note === undefined ? cur.note : note, id);
+  return getWaScheduled(id);
+}
+export function markWaScheduled(id, { status, wa_id = null, error = null }) {
+  db.prepare(
+    `UPDATE wa_scheduled SET status=?, wa_id=COALESCE(?, wa_id), error=?, attempts=attempts+1,
+       sent_at=CASE WHEN ?='sent' THEN datetime('now') ELSE sent_at END
+     WHERE id=?`).run(status, wa_id, error, status, id);
+  return getWaScheduled(id);
+}
+export function waScheduledPendingCount(chatId = null) {
+  return chatId
+    ? db.prepare(`SELECT COUNT(*) AS n FROM wa_scheduled WHERE status='pending' AND chat_id=?`).get(chatId).n
+    : db.prepare(`SELECT COUNT(*) AS n FROM wa_scheduled WHERE status='pending'`).get().n;
+}

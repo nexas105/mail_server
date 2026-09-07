@@ -327,6 +327,26 @@ export interface WaMessage {
   reactions?: WaReaction[];
 }
 
+/** Geplante Nachricht – ein Auftrag, den der Server zur Sendezeit ausführt. */
+export interface WaScheduled {
+  id: number;
+  wa_account_id: number;
+  chat_id: number;
+  chat_name: string | null;
+  chat_jid: string;
+  text: string;
+  /** Unix-Sekunden */
+  send_at: number;
+  status: 'pending' | 'sent' | 'failed' | 'cancelled';
+  origin: 'ui' | 'mcp';
+  note: string | null;
+  wa_id: string | null;
+  error: string | null;
+  attempts: number;
+  created_at: string;
+  sent_at: string | null;
+}
+
 /** Reaktionen, je Emoji zusammengefasst. `mine` = ich habe so reagiert. */
 export interface WaReaction {
   emoji: string;

@@ -23,7 +23,7 @@ import { parseVcf, contactsToVcf } from './vcard.js';
 import { fetchInbox, verifyImap, listMailboxes } from './imap.js';
 import * as gh from './github.js';
 import * as wa from './whatsapp.js';
-import { subscribe, ping as waPing, closeAllStreams } from './wa-bus.js';
+import { subscribe, ping as waPing, closeAllStreams, emit as waEmit } from './wa-bus.js';
 import { ROOT_DIR, STATIC_DIR, DATA_DIR } from './paths.js';
 import * as backup from './backup.js';
 
@@ -1021,6 +1021,30 @@ app.post('/api/whatsapp/chats/:id/backfill', wrap(async (req, res) => {
 }));
 
 /**
+ * Schutzregeln für Versand aus dem MCP-Prozess. Gelten für Sofortversand UND
+ * für geplante Nachrichten – deshalb eine Funktion, nicht zwei Kopien.
+ */
+function assertMaySend(origin, account, chat) {
+  if (origin !== 'mcp') return;
+  if (process.env.MAIL_WA_MCP_SEND !== '1') {
+    const e = new Error('Versand über MCP ist deaktiviert – MAIL_WA_MCP_SEND=1 setzen oder in der UI senden');
+    e.status = 403; throw e;
+  }
+  if (account.mcp_send_mode === 'off') {
+    const e = new Error(`Für "${account.name}" ist MCP-Versand abgeschaltet`);
+    e.status = 403; throw e;
+  }
+  if (account.mcp_send_mode === 'known') {
+    // Nur antworten, nie fremde Gespräche eröffnen: das ist zugleich der
+    // wirksamste Schutz gegen eine Nummernsperre.
+    if (!chat || !db.waChatHasInbound(chat.id)) {
+      const e = new Error('MCP darf nur in Chats schreiben, in denen bereits eine Nachricht eingegangen ist');
+      e.status = 403; throw e;
+    }
+  }
+}
+
+/**
  * Versand. Die Schutzmaßnahmen sitzen bewusst hier und nicht in einer
  * Tool-Beschreibung – so gelten sie für UI und MCP gleichermaßen.
  */
@@ -1033,25 +1057,7 @@ async function sendWhatsapp(req, { accountId, chatId, to, text, quoteWaId }) {
   if (!id) throw new Error('Kein WhatsApp-Konto angegeben');
   const account = db.getWaAccount(id);
   if (!account) throw new Error('WhatsApp-Konto nicht gefunden');
-
-  if (origin === 'mcp') {
-    if (process.env.MAIL_WA_MCP_SEND !== '1') {
-      const e = new Error('Versand über MCP ist deaktiviert – MAIL_WA_MCP_SEND=1 setzen oder in der UI senden');
-      e.status = 403; throw e;
-    }
-    if (account.mcp_send_mode === 'off') {
-      const e = new Error(`Für "${account.name}" ist MCP-Versand abgeschaltet`);
-      e.status = 403; throw e;
-    }
-    if (account.mcp_send_mode === 'known') {
-      // Nur antworten, nie fremde Gespräche eröffnen: das ist zugleich der
-      // wirksamste Schutz gegen eine Nummernsperre.
-      if (!chat || !db.waChatHasInbound(chat.id)) {
-        const e = new Error('MCP darf nur in Chats schreiben, in denen bereits eine Nachricht eingegangen ist');
-        e.status = 403; throw e;
-      }
-    }
-  }
+  assertMaySend(origin, account, chat);
 
   let jid = chat?.jid;
   if (!jid) {
@@ -1099,6 +1105,116 @@ app.post('/api/whatsapp/accounts/:id/messages', wrap(async (req, res) => {
     }));
   } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
 }));
+
+// ---- Geplante Nachrichten ---------------------------------------------------
+// Auftrag anlegen: Text jetzt festlegen, Versand später. Dieselben Schutzregeln
+// wie beim Sofortversand – geprüft beim Anlegen, damit der Fehler dort landet,
+// wo jemand ihn sieht, und nicht nachts im Planer.
+
+/** Nimmt Unix-Sekunden, Millisekunden oder ISO-8601 und liefert Unix-Sekunden. */
+function parseSendAt(v) {
+  if (v == null || v === '') throw new Error('send_at fehlt');
+  let ts;
+  if (typeof v === 'number' || /^\d+$/.test(String(v))) {
+    ts = Number(v);
+    if (ts > 1e12) ts = Math.floor(ts / 1000);
+  } else {
+    const d = new Date(String(v));
+    if (Number.isNaN(d.getTime())) throw new Error('send_at ist kein gültiger Zeitpunkt (ISO-8601 oder Unix-Sekunden)');
+    ts = Math.floor(d.getTime() / 1000);
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (ts < now - 60) throw new Error('send_at liegt in der Vergangenheit');
+  if (ts > now + 366 * 86400) throw new Error('send_at liegt mehr als ein Jahr in der Zukunft');
+  return ts;
+}
+
+app.get('/api/whatsapp/scheduled', wrap((req, res) => res.json(db.listWaScheduled({
+  waAccountId: req.query.account_id ? +req.query.account_id : null,
+  chatId: req.query.chat_id ? +req.query.chat_id : null,
+  status: req.query.status || null,
+  limit: +req.query.limit || 50,
+}))));
+
+app.post('/api/whatsapp/chats/:id/scheduled', wrap((req, res) => {
+  const chat = db.getWaChat(+req.params.id);
+  if (!chat) return res.status(404).json({ error: 'not found' });
+  const origin = req.get('x-origin') === 'mcp' ? 'mcp' : 'ui';
+  try {
+    const text = String(req.body?.text || '').trim();
+    if (!text) throw new Error('Text fehlt');
+    const account = db.getWaAccount(chat.wa_account_id);
+    assertMaySend(origin, account, chat);
+    const row = db.createWaScheduled({
+      wa_account_id: chat.wa_account_id, chat_id: chat.id, text,
+      send_at: parseSendAt(req.body?.send_at), origin,
+      note: req.body?.note ? String(req.body.note).slice(0, 200) : null,
+    });
+    waEmit('scheduled', { chat_id: chat.id, item: row });
+    res.status(201).json(row);
+  } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+}));
+
+app.put('/api/whatsapp/scheduled/:id', wrap((req, res) => {
+  try {
+    const patch = {};
+    if (req.body?.text !== undefined) {
+      patch.text = String(req.body.text).trim();
+      if (!patch.text) throw new Error('Text fehlt');
+    }
+    if (req.body?.send_at !== undefined) patch.send_at = parseSendAt(req.body.send_at);
+    if (req.body?.note !== undefined) patch.note = req.body.note ? String(req.body.note).slice(0, 200) : null;
+    const row = db.updateWaScheduled(+req.params.id, patch);
+    if (!row) return res.status(404).json({ error: 'Auftrag nicht gefunden oder nicht mehr offen' });
+    waEmit('scheduled', { chat_id: row.chat_id, item: row });
+    res.json(row);
+  } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+}));
+
+app.delete('/api/whatsapp/scheduled/:id', wrap((req, res) => {
+  const row = db.getWaScheduled(+req.params.id);
+  if (!row) return res.status(404).json({ error: 'not found' });
+  if (!db.cancelWaScheduled(row.id)) return res.status(409).json({ error: `Auftrag ist bereits ${row.status}` });
+  const after = db.getWaScheduled(row.id);
+  waEmit('scheduled', { chat_id: row.chat_id, item: after });
+  res.json(after);
+}));
+
+/**
+ * Planer: alle 30 s fällige Aufträge ausführen. Läuft nur hier, im
+ * Web-Server-Prozess – der WhatsApp-Socket lebt nirgendwo sonst.
+ * Ist das Konto gerade nicht verbunden, bleibt der Auftrag offen und wird
+ * beim nächsten Durchlauf erneut versucht; nach sechs Stunden Verspätung
+ * gilt er als gescheitert, damit nichts Tage später unpassend rausgeht.
+ */
+const SCHED_GRACE_SEC = 6 * 3600;
+let schedRunning = false;
+async function runScheduled() {
+  if (schedRunning) return;
+  schedRunning = true;
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    for (const job of db.dueWaScheduled(now)) {
+      try {
+        const msg = await wa.sendText(job.wa_account_id, job.chat_jid, job.text, { origin: job.origin });
+        const done = db.markWaScheduled(job.id, { status: 'sent', wa_id: msg?.wa_id || null });
+        waEmit('scheduled', { chat_id: job.chat_id, item: done });
+        console.log(`[whatsapp] geplante Nachricht #${job.id} an ${job.chat_name || job.chat_jid} gesendet`);
+      } catch (e) {
+        const expired = now - job.send_at > SCHED_GRACE_SEC;
+        const item = db.markWaScheduled(job.id, {
+          status: expired ? 'failed' : 'pending',
+          error: expired ? `Aufgegeben nach 6 h: ${e.message}` : e.message,
+        });
+        waEmit('scheduled', { chat_id: job.chat_id, item });
+        if (expired) console.error(`[whatsapp] geplante Nachricht #${job.id} aufgegeben: ${e.message}`);
+      }
+    }
+  } finally { schedRunning = false; }
+}
+setInterval(() => runScheduled().catch(e => console.error('[whatsapp] Planer:', e.message)), 30_000).unref();
+// Kurz nach dem Start einmal nachsehen – die Verbindung braucht ein paar Sekunden.
+setTimeout(() => runScheduled().catch(() => {}), 20_000).unref();
 
 app.get('/api/whatsapp/messages/:id/media', wrap(async (req, res) => {
   let m = db.getWaMessage(+req.params.id);

@@ -1142,6 +1142,15 @@ code { background: var(--panel2); border: 1px solid var(--border); border-radius
   padding-top: 10px; border-top: 1px solid var(--border);
 }
 .wa-composer textarea { flex: 1; margin: 0; resize: vertical; min-height: 44px; }
+.wa-composer .btn.active { border-color: var(--accent); color: var(--accent); }
+/* Geplante Nachrichten über dem Eingabefeld */
+.wa-scheduled { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px dashed var(--border); }
+.wa-sched-item {
+  display: flex; gap: 8px; align-items: center;
+  padding: 6px 8px; border-radius: 8px; background: var(--panel2);
+}
+.wa-sched-item.failed { border: 1px solid var(--red); }
+.wa-plan { padding: 8px 0 0; border-top: 1px dashed var(--border); }
 
 /* Abschnitts-Überschriften auf der Einstellungen-Seite */
 .settings-section {

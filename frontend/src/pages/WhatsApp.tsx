@@ -8,7 +8,7 @@ import { confirmDialog } from '../components/Dialog';
 import { Icon } from '../components/Icon';
 import { StickerMaker } from '../components/StickerMaker';
 import { StatusBadge } from '../components/WaStatus';
-import type { WaSession, WaChat, WaMessage, Contact, WaReaction } from '../lib/types';
+import type { WaSession, WaChat, WaMessage, Contact, WaReaction, WaScheduled } from '../lib/types';
 import { ROUTES } from '../lib/routes';
 
 /**
@@ -191,21 +191,36 @@ function Thread({ chatId, connected }: { chatId: number; connected: boolean }) {
   const [sticker, setSticker] = useState(false);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [cq, setCq] = useState('');
+  // Geplante Nachrichten: Panel zum Anlegen + Liste der offenen Aufträge.
+  const [planning, setPlanning] = useState(false);
+  const [planAt, setPlanAt] = useState('');
+  const [planNote, setPlanNote] = useState('');
+  const [scheduled, setScheduled] = useState<WaScheduled[]>([]);
   const endRef = useRef<HTMLDivElement>(null);
   const nav = useNavigate();
 
   const load = () => api<WaMessage[]>(`/whatsapp/chats/${chatId}/messages?limit=60`)
     .then(m => setMsgs(m.slice().reverse()));
 
+  const loadScheduled = () => api<WaScheduled[]>(`/whatsapp/scheduled?chat_id=${chatId}&limit=20`)
+    .then(setScheduled).catch(() => {});
+
   useEffect(() => {
     api<WaChat>('/whatsapp/chats/' + chatId).then(setChat);
     load();
+    loadScheduled();
     api('/whatsapp/chats/' + chatId + '/read', { method: 'POST' }).catch(() => {});
   }, [chatId]);
 
   useEffect(() => onWaEvent((event, data) => {
     if (event === 'message' && data?.message?.chat_id === chatId) {
       setMsgs(ms => (ms || []).some(m => m.id === data.message.id) ? ms : [...(ms || []), data.message]);
+    }
+    if (event === 'scheduled' && data?.chat_id === chatId && data.item) {
+      setScheduled(list => {
+        const rest = list.filter(x => x.id !== data.item.id);
+        return [data.item as WaScheduled, ...rest];
+      });
     }
     if (event === 'reaction' && data?.chat_id === chatId) {
       setMsgs(ms => (ms || []).map(m =>
@@ -235,6 +250,52 @@ function Thread({ chatId, connected }: { chatId: number; connected: boolean }) {
       setText('');
     } catch (e) { toast((e as Error).message, 'err'); }
     setSending(false);
+  }
+
+  /** Vorbelegung fürs Planen: nächste volle Stunde, als Wert für datetime-local. */
+  function openPlanning() {
+    const d = new Date(Date.now() + 3600_000);
+    d.setMinutes(0, 0, 0);
+    setPlanAt(toLocalInput(d));
+    setPlanning(true);
+  }
+
+  async function schedule() {
+    const t = text.trim();
+    if (!t || !planAt) return;
+    const when = new Date(planAt);
+    if (Number.isNaN(when.getTime())) { toast('Zeitpunkt ungültig', 'err'); return; }
+    if (when.getTime() < Date.now()) { toast('Zeitpunkt liegt in der Vergangenheit', 'err'); return; }
+    setSending(true);
+    try {
+      await api(`/whatsapp/chats/${chatId}/scheduled`, {
+        method: 'POST', body: { text: t, send_at: when.toISOString(), note: planNote.trim() || undefined },
+      });
+      setText(''); setPlanNote(''); setPlanning(false);
+      toast('Eingeplant für ' + when.toLocaleString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }));
+      loadScheduled();
+    } catch (e) { toast((e as Error).message, 'err'); }
+    setSending(false);
+  }
+
+  async function cancelScheduled(item: WaScheduled) {
+    if (!await confirmDialog({ title: 'Geplante Nachricht zurückziehen?', message: item.text.slice(0, 160), confirmLabel: 'Zurückziehen', danger: true })) return;
+    try {
+      await api(`/whatsapp/scheduled/${item.id}`, { method: 'DELETE' });
+      loadScheduled();
+    } catch (e) { toast((e as Error).message, 'err'); }
+  }
+
+  /** Text in den Composer zurückholen, Auftrag zurückziehen – so „ändert" man ihn. */
+  async function editScheduled(item: WaScheduled) {
+    try {
+      await api(`/whatsapp/scheduled/${item.id}`, { method: 'DELETE' });
+      setText(item.text);
+      setPlanNote(item.note || '');
+      setPlanAt(toLocalInput(new Date(item.send_at * 1000)));
+      setPlanning(true);
+      loadScheduled();
+    } catch (e) { toast((e as Error).message, 'err'); }
   }
 
   /** Mit einem vorhandenen Kontakt verknüpfen. */
@@ -406,21 +467,98 @@ function Thread({ chatId, connected }: { chatId: number; connected: boolean }) {
         <StickerMaker chatId={chatId} onClose={() => setSticker(false)} onSent={() => {}} />
       )}
 
+      {/* Offene und gescheiterte Aufträge – erledigte verschwinden still. */}
+      {scheduled.some(x => x.status === 'pending' || x.status === 'failed') && (
+        <div className="wa-scheduled">
+          {scheduled.filter(x => x.status === 'pending' || x.status === 'failed').map(x => (
+            <div key={x.id} className={'wa-sched-item' + (x.status === 'failed' ? ' failed' : '')}>
+              <Icon name={x.status === 'failed' ? 'alert' : 'clock'} size={13} />
+              <div className="grow" style={{ minWidth: 0 }}>
+                <div className="small">
+                  <strong>{schedWhen(x.send_at)}</strong>
+                  {x.note && <span className="muted"> · {x.note}</span>}
+                  {x.origin === 'mcp' && <span className="badge" style={{ marginLeft: 6 }}>KI</span>}
+                </div>
+                <div className="muted small" style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                  title={x.text}>
+                  {x.status === 'failed' ? `Gescheitert: ${x.error || 'unbekannt'} – ` : ''}{x.text}
+                </div>
+                {x.status === 'pending' && x.error && (
+                  <div className="muted small">Letzter Versuch: {x.error}</div>
+                )}
+              </div>
+              {x.status === 'pending' && (
+                <button className="btn ghost sm" title="Text zurück in den Editor, Auftrag zurückziehen"
+                  onClick={() => editScheduled(x)}>
+                  <Icon name="edit" size={12} />
+                </button>
+              )}
+              <button className="btn ghost sm" title={x.status === 'pending' ? 'Zurückziehen' : 'Ausblenden'}
+                onClick={() => x.status === 'pending' ? cancelScheduled(x)
+                  : setScheduled(l => l.filter(y => y.id !== x.id))}>
+                <Icon name="x" size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {planning && (
+        <div className="wa-plan">
+          <div className="muted small" style={{ marginBottom: 6 }}>
+            Text unten eingeben – er geht zum gewählten Zeitpunkt automatisch raus, solange der
+            Server läuft und das Konto verbunden ist.
+          </div>
+          <div className="toolbar" style={{ marginBottom: 0, flexWrap: 'wrap' }}>
+            <input type="datetime-local" value={planAt} style={{ width: 'auto', margin: 0 }}
+              onChange={e => setPlanAt(e.target.value)} />
+            <input value={planNote} placeholder="Merkzettel (optional), z.B. „Nach ihrer Woche fragen“"
+              style={{ flex: 1, minWidth: 160, margin: 0 }} maxLength={200}
+              onChange={e => setPlanNote(e.target.value)} />
+            <button className="btn sm" disabled={!connected || sending || !text.trim() || !planAt} onClick={schedule}>
+              <Icon name="clock" size={13} /> Einplanen
+            </button>
+            <button className="btn ghost sm" onClick={() => setPlanning(false)}>Abbrechen</button>
+          </div>
+        </div>
+      )}
+
       <div className="wa-composer">
-        <textarea rows={2} value={text} placeholder={connected ? 'Nachricht …' : 'Nicht verbunden'}
+        <textarea rows={2} value={text} placeholder={connected ? (planning ? 'Geplante Nachricht …' : 'Nachricht …') : 'Nicht verbunden'}
           disabled={!connected || sending}
           onChange={e => setText(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); planning ? schedule() : send(); } }} />
         <button className="btn ghost icon-only" title="Sticker aus Bild" disabled={!connected}
           onClick={() => setSticker(true)}>
           <Icon name="sticker" size={15} />
         </button>
-        <button className="btn" disabled={!connected || sending || !text.trim()} onClick={send}>
-          <Icon name="send" size={14} /> {sending ? '…' : 'Senden'}
+        <button className={'btn ghost icon-only' + (planning ? ' active' : '')} title="Später senden" disabled={!connected}
+          onClick={() => planning ? setPlanning(false) : openPlanning()}>
+          <Icon name="clock" size={15} />
         </button>
+        {planning ? (
+          <button className="btn" disabled={!connected || sending || !text.trim() || !planAt} onClick={schedule}>
+            <Icon name="clock" size={14} /> {sending ? '…' : 'Einplanen'}
+          </button>
+        ) : (
+          <button className="btn" disabled={!connected || sending || !text.trim()} onClick={send}>
+            <Icon name="send" size={14} /> {sending ? '…' : 'Senden'}
+          </button>
+        )}
       </div>
     </div>
   );
+}
+
+/** Datum für <input type="datetime-local"> – in Ortszeit, ohne Sekunden. */
+function toLocalInput(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function schedWhen(ts: number): string {
+  return new Date(ts * 1000).toLocaleString('de-DE',
+    { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
 const TICK: Record<string, string> = { pending: '·', sent: '✓', delivered: '✓✓', read: '✓✓' };
