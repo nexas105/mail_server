@@ -7,6 +7,8 @@
  * Dadurch benutzen Web-Server und MCP-Server dasselbe Modul identisch.
  */
 
+import { assertSafeTarget, assertSameOrigin } from './net-guard.js';
+
 const UA = 'mail-server/1.0';
 const API_VERSION = '2022-11-28';
 const TIMEOUT_MS = 15_000;
@@ -26,45 +28,30 @@ export function redact(text) {
   return String(text ?? '').replace(/gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/g, '***');
 }
 
-const enc = p => String(p || '').split('/').filter(Boolean).map(encodeURIComponent).join('/');
+/**
+ * Baut Pfadsegmente in eine URL ein. Die Segmente kommen vom Aufrufer (KI,
+ * Web-UI) – „..“ (auch kodiert als %2e%2e) oder ein eingeschmuggelter „/“
+ * würden sonst aus /repos/o/r/contents/… herauslaufen und einen ganz anderen
+ * API-Endpunkt mit dem Token ansprechen.
+ */
+const enc = p => String(p || '').split('/').filter(Boolean).map(seg => {
+  let plain;
+  try { plain = decodeURIComponent(seg); } catch { throw new Error('Ungültiger Pfad'); }
+  if (plain === '.' || plain === '..' || plain.includes('/') || plain.includes('\\') || /[\0-\x1f]/.test(plain)) {
+    throw new Error('Ungültiger Pfad');
+  }
+  return encodeURIComponent(seg);
+}).join('/');
 
 /**
- * Prüft die API-Adresse, BEVOR das Token dorthin geschickt wird.
- *
- * api_base ist frei einstellbar (für GitHub Enterprise). Ohne diese Prüfung
- * könnte dort eine interne Adresse stehen – etwa der Metadaten-Dienst einer
- * Cloud – und das Token ginge im Authorization-Header genau dahin.
- * MAIL_GITHUB_ALLOW_PRIVATE=1 hebt die Sperre für ein wirklich intern
+ * Prüfung der API-Adresse, BEVOR das Token dorthin geschickt wird – siehe
+ * src/net-guard.js. api_base ist frei einstellbar (GitHub Enterprise); ohne
+ * Prüfung könnte dort eine interne Adresse stehen und das Token ginge im
+ * Authorization-Header genau dahin. MAIL_GITHUB_ALLOW_PRIVATE=1 (alt) oder
+ * MAIL_ALLOW_PRIVATE_HOSTS=1 heben die Sperre für ein wirklich intern
  * betriebenes GitHub Enterprise auf.
  */
-const PRIVATE_HOSTS = /^(localhost|.*\.localhost|.*\.internal|.*\.local)$/i;
-function assertSafeBase(base) {
-  let u;
-  try { u = new URL(base); } catch { throw new Error(`Ungültige GitHub-API-Adresse: ${base}`); }
-  if (u.protocol !== 'https:') {
-    throw new Error('Die GitHub-API-Adresse muss mit https:// beginnen');
-  }
-  if (process.env.MAIL_GITHUB_ALLOW_PRIVATE === '1') return u;
-
-  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  const isPrivate =
-    PRIVATE_HOSTS.test(host)
-    // IPv4: Loopback, privat, Link-Local (169.254.169.254 = Cloud-Metadaten), CGNAT
-    || /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)
-    || /^172\.(1[6-9]|2\d|3[01])\./.test(host) || /^169\.254\./.test(host)
-    || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(host) || host === '0.0.0.0'
-    // IPv6: Loopback, Unique Local, Link-Local
-    || host === '::1' || /^f[cd]/i.test(host) || /^fe80:/i.test(host);
-
-  if (isPrivate) {
-    throw new Error(
-      `GitHub-API-Adresse zeigt auf ein internes Ziel (${u.hostname}) – abgelehnt, `
-      + 'damit das Token nicht dorthin gesendet wird. Für ein internes GitHub Enterprise: '
-      + 'MAIL_GITHUB_ALLOW_PRIVATE=1 setzen.');
-  }
-  return u;
-}
-
+const guardOpts = () => ({ purpose: 'GitHub-API', allowPrivate: process.env.MAIL_GITHUB_ALLOW_PRIVATE === '1' });
 
 
 /** Link-Header der letzten Antwort – paginate() folgt ihm. */
@@ -123,10 +110,10 @@ async function toError(res) {
  */
 async function gh(conn, pathOrUrl, { method = 'GET', accept = 'application/vnd.github+json', query, raw = false } = {}) {
   const base = conn.apiBase || 'https://api.github.com';
-  assertSafeBase(base);
-  // Auch nachgereichte URLs prüfen: paginate() folgt dem Link-Header, und den
-  // liefert die Gegenstelle.
-  if (pathOrUrl.startsWith('http')) assertSafeBase(pathOrUrl);
+  await assertSafeTarget(base, guardOpts());
+  // Nachgereichte URLs (paginate() folgt dem Link-Header, den liefert die
+  // Gegenstelle) müssen zur konfigurierten API-Adresse gehören.
+  if (pathOrUrl.startsWith('http')) assertSameOrigin(pathOrUrl, base);
   let url = pathOrUrl.startsWith('http') ? pathOrUrl : base.replace(/\/$/, '') + pathOrUrl;
   if (query) {
     const qs = new URLSearchParams(Object.entries(query).filter(([, v]) => v != null && v !== ''));

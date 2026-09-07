@@ -1062,7 +1062,7 @@ export function DraftEditor() {
               An: {preview.to} · Betreff: {preview.subject || '(kein Betreff)'}
             </div>
             <div className={'preview-frame ' + previewDevice}>
-              <iframe className="preview" title="Vorschau"
+              <iframe className="preview" title="Vorschau" sandbox=""
                 srcDoc={preview.html || '<em style="font-family:sans-serif;color:#888">Kein HTML-Inhalt</em>'} />
             </div>
           </div>

@@ -5,9 +5,12 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BACKEND_DIR } from './paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT = path.join(__dirname, '..');
+// cwd des Kindprozesses ist backend/ – Pfade zu data/ und frontend/dist löst
+// der Server selbst über src/paths.js auf, unabhängig vom cwd.
+const PROJECT = BACKEND_DIR;
 const SERVER = path.join(__dirname, 'server.js');
 const LAUNCHER_PORT = Number(process.env.LAUNCHER_PORT || 3999);
 const BACKEND_PORT = Number(process.env.PORT || 3000);
@@ -149,8 +152,32 @@ function send(res, code, body, type = 'application/json') {
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 }
 
+// Der Control-Server lauscht zwar nur auf 127.0.0.1, aber jede Webseite im
+// Browser kann trotzdem Requests an localhost:3999 schicken (DNS-Rebinding,
+// Formular-POST von einer fremden Seite). Darum: Host-Header muss lokal sein,
+// und schreibende Aufrufe müssen von der eigenen Control-Page kommen.
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const OWN_ORIGINS = new Set([
+  `http://localhost:${LAUNCHER_PORT}`, `http://127.0.0.1:${LAUNCHER_PORT}`, `http://[::1]:${LAUNCHER_PORT}`,
+]);
+function hostIsLocal(host) {
+  const h = String(host || '').toLowerCase();
+  // optionalen Port abschneiden – bei IPv6 steht der Host in eckigen Klammern
+  const name = h.startsWith('[') ? h.replace(/\]:\d+$/, ']') : h.replace(/:\d+$/, '');
+  return LOCAL_HOSTS.has(name);
+}
+function crossSiteWrite(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site && site !== 'same-origin' && site !== 'none') return true;
+  const origin = req.headers.origin;
+  if (origin && !OWN_ORIGINS.has(String(origin).toLowerCase())) return true;
+  return false;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = req.url.split('?')[0];
+  if (!hostIsLocal(req.headers.host)) return send(res, 421, { error: 'Host nicht erlaubt' });
+  if (req.method === 'POST' && crossSiteWrite(req)) return send(res, 403, { error: 'Aufruf von fremder Herkunft abgelehnt' });
   try {
     if (req.method === 'GET' && url === '/') return send(res, 200, PAGE, 'text/html; charset=utf-8');
     if (req.method === 'GET' && url === '/api/status') return send(res, 200, await status());

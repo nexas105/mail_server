@@ -15,8 +15,6 @@
 //
 // Schreiben:  node src/template-kit.js --write
 import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif";
 const T = 'role="presentation" cellpadding="0" cellspacing="0" border="0"';
@@ -408,8 +406,8 @@ if (process.argv[1] && process.argv[1].endsWith('template-kit.js')) {
     else { db.createTemplate(t); created++; }
   }
   if (write) {
-    const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-    const res = db.exportContent(path.join(root, 'content.seed.json'));
+    // Ziel: backend/content.seed.json (bzw. CONTENT_SEED_FILE, siehe paths.js).
+    const res = db.exportContent();
     console.log(`geschrieben: ${updated} aktualisiert, ${created} neu · Seed: ${res.templates} Vorlagen`);
   } else {
     console.log(`\nTrockenlauf – mit --write schreiben. ${TEMPLATES.length} Vorlagen, ${fs.existsSync('.') ? '' : ''}${existing.length} vorhanden.`);

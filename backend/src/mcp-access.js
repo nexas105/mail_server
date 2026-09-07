@@ -112,6 +112,14 @@ export function verifyMcpToken(token, { ip = null } = {}) {
 // ---- Protokoll ------------------------------------------------------------
 const EVENT_CAP = Math.max(200, Number(process.env.MCP_LOG_CAP || 5000));
 
+// Schlüssel, deren Wert nie ins Protokoll darf. Geheimnisse werden zu `***`,
+// Inhalte (HTML, Text, base64) nur als Länge notiert – egal wie kurz sie sind.
+// Anlass: `create_smtp_account`/`update_smtp_account` nehmen `password` als
+// kurze Zeichenkette entgegen, und die landete damit im Klartext in
+// mcp_events.summary – lesbar für jeden, der die Protokoll-Ansicht öffnet.
+const SECRET_KEY = /password|pass|token|secret|key/i;
+const CONTENT_KEY = /base64|webp|html|text|body/i;
+
 /**
  * Fasst die Argumente eines Aufrufs zusammen – Zahlen und kurze Zeichenketten.
  * Bewusst KEINE Inhalte: HTML-Rümpfe, base64-Anhänge und Nachrichtentexte
@@ -122,7 +130,9 @@ export function summarizeArgs(args = {}) {
   const parts = [];
   for (const [k, v] of Object.entries(args)) {
     if (v == null) continue;
-    if (typeof v === 'number' || typeof v === 'boolean') parts.push(`${k}=${v}`);
+    if (SECRET_KEY.test(k)) parts.push(`${k}=***`);
+    else if (CONTENT_KEY.test(k)) parts.push(`${k}=…${typeof v === 'string' ? v.length : JSON.stringify(v).length} Zeichen`);
+    else if (typeof v === 'number' || typeof v === 'boolean') parts.push(`${k}=${v}`);
     else if (typeof v === 'string') {
       if (v.length > 60 || /<[a-z]/i.test(v)) parts.push(`${k}=…${v.length} Zeichen`);
       else parts.push(`${k}=${v}`);

@@ -25,6 +25,23 @@ auf **Senden** – inklusive **Batch-Versand** mit Personalisierung.
 - **MCP-Server**: Claude legt Entwürfe an; senden tust du in der UI (oder auf Wunsch per Tool)
 - Keine nativen Module – nutzt Node 22+ eingebautes `node:sqlite`
 
+## Projektstruktur
+
+```
+backend/    Node-Service: package.json, src/ (server.js, mcp-server.js, launcher.mjs …),
+            content.seed.json, accounts.seed.example.json, Dockerfile
+frontend/   React/Vite-Oberfläche, Dockerfile + nginx.conf (liefert im Docker-Betrieb
+            die UI und proxied /api ans Backend)
+data/       Laufzeitdaten (SQLite, Anhänge, WhatsApp-Sitzungen) – nicht im Repo;
+            per MAIL_DATA_DIR verschiebbar
+swift/      macOS-App (unverändert)
+docker-compose.yml, .env.example im Root
+```
+
+Die `package.json` im Root delegiert an die Teilprojekte: `npm start`, `npm run launch`,
+`npm run mcp`, `npm run build`, `npm run dev:web` und `npm run install:all`
+(= `npm --prefix backend ci && npm --prefix frontend ci`).
+
 ## Native macOS-App (SwiftUI)
 
 Es gibt zusätzlich eine **native macOS-App** unter `swift/` — ein vollwertiger
@@ -33,11 +50,12 @@ Client (Entwürfe, Kontakte, Vorlagen, Posteingang, Accounts, Postausgang) mit
 und kann den Node-Server bei Bedarf selbst starten („Server starten").
 
 ```bash
-npm run app               # baut & startet die App (Release)
-# oder auf dem Mac: Doppelklick auf  app.command
+# auf dem Mac: Doppelklick auf  app.command   (baut & startet die App, Release)
+# oder von Hand:
+swift run --package-path swift -c release MailServerApp
 ```
 
-Beim ersten Start ggf. den Projekt-Root wählen (der Ordner mit `src/server.js`) –
+Beim ersten Start ggf. den Projekt-Root wählen (der Ordner mit `backend/src/server.js`) –
 danach kann die App das Backend per Klick starten. Die Server-Adresse (Standard
 `http://localhost:3000`) ist unten in der Seitenleiste einstellbar.
 
@@ -47,7 +65,7 @@ Am einfachsten über den **Launcher** – ein kleiner Steuer-Prozess mit Webober
 der das Backend starten/stoppen/neustarten kann und den Status zeigt:
 
 ```bash
-npm run launch            # → http://localhost:3999
+npm run launch            # → http://localhost:3999  (node backend/src/launcher.mjs)
 # oder auf dem Mac: Doppelklick auf  start.command
 ```
 
@@ -62,14 +80,15 @@ Gesundheits-Check für eigene Skripte/Monitoring: `GET /api/health` →
 ## Setup
 
 ```bash
-npm install        # Backend-Abhängigkeiten
-npm run build      # Frontend (React) installieren + bauen -> frontend/dist
-npm start          # Web-UI:  http://localhost:3000
+npm run install:all   # Abhängigkeiten für backend/ und frontend/
+npm run build         # Frontend (React) bauen -> frontend/dist
+npm start             # Web-UI:  http://localhost:3000  (node backend/src/server.js)
 ```
 
-Das Frontend ist eine React-App (Vite + TypeScript) unter `frontend/`. Express
-serviert den fertigen Build aus `frontend/dist`. Nach Frontend-Änderungen erneut
-`npm run build` ausführen.
+Das Backend liegt unter `backend/`, das Frontend ist eine React-App (Vite +
+TypeScript) unter `frontend/`. Express serviert den fertigen Build aus
+`frontend/dist` (anderer Ort per `MAIL_STATIC_DIR`; fehlt der Build, liefert das
+Backend nur die API). Nach Frontend-Änderungen erneut `npm run build` ausführen.
 
 ### Frontend-Entwicklung (Hot Reload)
 
@@ -80,7 +99,8 @@ npm run dev:web    # Terminal 2: Vite auf :5173 (proxied /api an :3000)
 
 Dann `http://localhost:5173` öffnen – Änderungen sind sofort live.
 
-Beim ersten Start wird `data/mail.db` und ein Schlüssel (`data/.keyfile`) erzeugt.
+Beim ersten Start wird `data/mail.db` und ein Schlüssel (`data/.keyfile`) erzeugt
+(`data/` liegt im Projekt-Root; anderer Ort per `MAIL_DATA_DIR`).
 Alternativ einen festen Schlüssel setzen:
 
 ```bash
@@ -110,7 +130,9 @@ export MAIL_SETUP_TOKEN=$(openssl rand -hex 16)   # wird im Formular abgefragt
 ```
 
 Weitere Benutzer, Passwortwechsel und aktive Sitzungen: **Einstellungen → Zugang**.
-Nur Administratoren dürfen Benutzer verwalten; inhaltlich sehen alle dasselbe.
+Inhaltlich sehen alle dasselbe; normale Nutzer dürfen lesen, schreiben und senden.
+Benutzerverwaltung und Konfiguration (Konten, GitHub, WhatsApp-Konten,
+Einstellungen) bleiben Administratoren vorbehalten.
 
 **Was der Schutz umfasst**
 
@@ -152,10 +174,47 @@ Traefik) davor; der Node-Prozess bleibt auf `127.0.0.1`. Wichtig dabei:
 |----------|---------|
 | `MAIL_TRUST_PROXY=1` | echte Client-IP für Rate-Limits, `Secure`-Cookie bei https |
 | `MAIL_ALLOWED_HOSTS=mail.example.de` | fremde Host-Header werden mit 421 abgewiesen |
+| `MAIL_INTERNAL_HOSTS=backend,127.0.0.1` | interne Namen, die zusätzlich immer gelten (Docker Compose setzt das selbst) |
 | `MAIL_SETUP_TOKEN=…` | schützt die Ersteinrichtung |
 | `MAIL_CRYPTO_KEY=…` | fester Schlüssel statt `data/.keyfile` (wichtig für Backups/Umzüge) |
+| `MAIL_DATA_DIR=/srv/mail-data` | Datenverzeichnis (Standard: `data/` im Projekt-Root) |
+| `MAIL_STATIC_DIR=/srv/mail-ui` | Frontend-Build (Standard: `frontend/dist`); fehlt er, liefert das Backend nur die API |
+| `MAIL_ALLOW_PRIVATE_HOSTS=1` | erlaubt CardDAV-/GitHub-Ziele im privaten Netz und per `http` (Standard: abgelehnt) |
+| `MAIL_IMAP_ALLOW_SELF_SIGNED=1` | IMAP ohne Zertifikatsprüfung (Standard: Zertifikate werden geprüft) |
 
 `data/` enthält Datenbank, Schlüssel und Anhänge – sichern, aber niemals committen.
+
+### Docker Compose
+
+Für den Server-Betrieb ohne lokales Node gibt es ein `docker-compose.yml` im Root:
+
+```bash
+cp .env.example .env      # mindestens diese Werte setzen:
+#   MAIL_CRYPTO_KEY=$(openssl rand -hex 32)
+#   MAIL_SETUP_TOKEN=…
+#   MAIL_ALLOWED_HOSTS=<öffentlicher Host>
+#   MAIL_PUBLIC_URL=https://…
+docker compose up -d --build   # → UI auf http://127.0.0.1:${WEB_PORT:-8080}
+docker compose logs -f backend
+```
+
+Standardmäßig ist der Port nur lokal gebunden; `WEB_BIND=0.0.0.0` öffnet ihn nach
+außen. In jedem Fall gehört ein TLS-Reverse-Proxy (Caddy, Traefik, nginx) davor.
+
+Die Services:
+
+- **`backend`** – der Node-Service, nur intern erreichbar.
+- **`frontend`** – nginx, liefert die UI und proxied `/api` ans Backend.
+- **`mcp`** (optional, Profil) – der MCP-Server über HTTP:
+  `docker compose --profile mcp up -d`. Braucht `MCP_TOKEN` und
+  `MCP_ALLOWED_HOSTS`; lauscht auf Port `${MCP_PORT:-3010}` an `${MCP_BIND:-127.0.0.1}`.
+
+Die Daten liegen im Volume `mail-data` (`/data` im Container) – Backup heißt:
+dieses Volume sichern. `MAIL_CRYPTO_KEY` unbedingt in `.env` setzen, sonst liegt
+der Schlüssel nur im Volume und ist nach dessen Verlust unwiederbringlich weg.
+
+> Der Launcher (Port 3999) und die macOS-App sind für den lokalen Betrieb gedacht,
+> nicht für Docker.
 
 ## Accounts per Datei (Seed)
 
@@ -163,16 +222,16 @@ Accounts lassen sich zusätzlich zur UI aus einer Datei anlegen. Kopiere die Vor
 und trage deine Zugangsdaten ein:
 
 ```bash
-cp accounts.seed.example.json accounts.seed.json
+cp backend/accounts.seed.example.json backend/accounts.seed.json
 ```
 
-Beim Start werden alle Accounts aus `accounts.seed.json` in die DB übernommen,
+Beim Start werden alle Accounts aus `backend/accounts.seed.json` in die DB übernommen,
 **die noch nicht existieren** (Abgleich per `name`). Bestehende — auch in der UI
 bearbeitete — Accounts werden nie überschrieben. Idempotent: mehrfaches Starten
 legt nichts doppelt an.
 
-- `accounts.seed.json` ist **gitignored** (echte Passwörter, niemals committen).
-- `accounts.seed.example.json` ist die committbare Vorlage.
+- `backend/accounts.seed.json` ist **gitignored** (echte Passwörter, niemals committen).
+- `backend/accounts.seed.example.json` ist die committbare Vorlage.
 - Anderer Pfad via `SEED_FILE=/pfad/zu/accounts.json npm start`.
 
 Felder pro Eintrag: `name, host, port, secure, username, password, from_name, from_email`.
@@ -181,10 +240,10 @@ Passwörter werden wie in der UI verschlüsselt in der DB abgelegt.
 ## Inhalte per Datei (Vorlagen & Custom-Felder)
 
 Vorlagen (Header/Body/Footer/Voll) und globale Custom-Felder werden aus
-`content.seed.json` geladen. Anders als `accounts.seed.json` enthält sie **keine
+`backend/content.seed.json` geladen. Anders als `accounts.seed.json` enthält sie **keine
 Geheimnisse** und ist **committbar** – so kannst du deine Vorlagen versionieren.
 
-- Beim ersten Start wird `content.seed.json` aus eingebauten Defaults erzeugt
+- Beim ersten Start wird `backend/content.seed.json` aus eingebauten Defaults erzeugt
   (9 Start-Vorlagen: je 3× Header/Body/Footer + 4 Custom-Felder).
 - Danach ist die Datei die Quelle: Vorlagen werden **idempotent** (per Name, nie
   überschreibend) und Custom-Felder **per Schlüssel** (Upsert) übernommen.
@@ -205,7 +264,7 @@ mit `kind` = `full | header | body | footer`.
   "mcpServers": {
     "mail-server": {
       "command": "node",
-      "args": ["/Users/nexas/Dev/etc/mail_server/src/mcp-server.js"]
+      "args": ["/Users/nexas/Dev/etc/mail_server/backend/src/mcp-server.js"]
     }
   }
 }
@@ -214,8 +273,10 @@ mit `kind` = `full | header | body | footer`.
 Oder in Claude Code:
 
 ```bash
-claude mcp add mail-server -- node /Users/nexas/Dev/etc/mail_server/src/mcp-server.js
+claude mcp add mail-server -- node /Users/nexas/Dev/etc/mail_server/backend/src/mcp-server.js
 ```
+
+(Lokal zum Ausprobieren: `npm run mcp` im Root startet denselben Server per stdio.)
 
 > Web-UI **und** MCP teilen dieselbe `data/mail.db`. Lass `npm start` laufen, damit
 > die von Claude erzeugten Entwürfe sofort in der UI erscheinen.
@@ -227,7 +288,8 @@ statt stdio:
 
 ```bash
 export MCP_TOKEN=$(openssl rand -hex 32)
-npm run mcp:http                     # → http://127.0.0.1:3010/mcp
+MCP_TRANSPORT=http npm run mcp       # → http://127.0.0.1:3010/mcp
+# (oder fertig verpackt: docker compose --profile mcp up -d, siehe „Docker Compose")
 ```
 
 Im Client (z.B. `~/.claude.json`):
@@ -305,7 +367,7 @@ Claude ruft `create_draft` + `add_recipients_from_list` auf und gibt dir den
 
 ## Vorlagen: das mitgelieferte Design
 
-Die 25 mitgelieferten Vorlagen entstehen aus einem Baukasten (`src/template-kit.js`)
+Die 25 mitgelieferten Vorlagen entstehen aus einem Baukasten (`backend/src/template-kit.js`)
 statt aus handgeschriebenem HTML pro Stück. Grund: E-Mail-HTML ist nicht Web-HTML.
 Outlook für Windows rendert mit der Word-Engine — kein Flexbox, kein Grid, keine
 `border-radius` auf `<div>`, keine Verläufe, und Innenabstand auf `<div>` ist
@@ -327,8 +389,8 @@ Neu erzeugen (überschreibt die mitgelieferten Vorlagen anhand des Namens, eigen
 bleiben unberührt):
 
 ```bash
-node src/template-kit.js            # Trockenlauf
-node src/template-kit.js --write    # schreiben + content.seed.json aktualisieren
+node backend/src/template-kit.js            # Trockenlauf
+node backend/src/template-kit.js --write    # schreiben + backend/content.seed.json aktualisieren
 ```
 
 ## Personalisierung
@@ -472,3 +534,19 @@ immer mit dem GIF, auch bei unbekanntem Token, und verrät damit nichts.
 - **Daten:** SMTP-/IMAP-Passwörter, GitHub-Token und das interne Service-Token
   liegen AES-256-GCM-verschlüsselt in der Datenbank. `data/` (DB + `.keyfile`)
   niemals committen und beim Umzug den `MAIL_CRYPTO_KEY` mitnehmen.
+- **Fremdes HTML:** Vorschau- und Lese-iframes laufen sandboxed. Medien und Assets
+  werden nur mit Mime-Allowlist und `Content-Disposition: attachment` ausgeliefert.
+  Externe Bilder in empfangenen Mails sind standardmäßig blockiert – ein Button
+  pro Nachricht lädt sie nach.
+- **Zugangsdaten:** Wer bei SMTP/IMAP/CardDAV den Server wechselt, muss das
+  Passwort neu eingeben – ein gespeichertes Passwort wandert nie stillschweigend
+  zu einem anderen Host. IMAP prüft Zertifikate (Ausnahme nur per
+  `MAIL_IMAP_ALLOW_SELF_SIGNED=1`).
+- **Ausgehende Verbindungen:** CardDAV und GitHub müssen `https` sein und dürfen
+  nicht auf private Adressen zeigen (localhost, 10/8, 192.168/16 …). Für
+  Heimnetz-Setups: `MAIL_ALLOW_PRIVATE_HOSTS=1`.
+- **Rollen:** Konfigurationsänderungen (Konten, GitHub, WhatsApp-Konten,
+  Einstellungen) sind Administratoren vorbehalten. Normale Nutzer dürfen lesen,
+  schreiben und senden.
+- **MCP-Protokoll:** Mitgeschrieben werden Werkzeug, Dauer und Erfolg –
+  Passwörter und Mail-Inhalte sind maskiert.

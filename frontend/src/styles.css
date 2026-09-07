@@ -420,6 +420,7 @@ body:has(.inbox-page) main { max-width: none; padding: 0; overflow: hidden; }
 .reading-loading .skel { height: 180px; }
 .reading-header { padding: 18px 22px 13px; border-bottom: 1px solid var(--border); }
 .reading-actions { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 14px; }
+.reading-actions .btn.active { color: var(--accent); border-color: var(--accent); }
 .reading-header h2 { max-width: 35ch; margin: 0 0 16px; font-size: clamp(17px, 2vw, 22px); line-height: 1.25; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .sender-line { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .sender-line > span:nth-child(2) { flex: 1; min-width: 0; }

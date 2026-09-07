@@ -1,0 +1,72 @@
+# Mail-Server per Docker Compose.
+#
+# Betrieb: hinter einem TLS-Reverse-Proxy (Caddy/Traefik/nginx), der auf
+# WEB_PORT (Standard 127.0.0.1:8080) weiterleitet. In .env unbedingt setzen:
+#   MAIL_ALLOWED_HOSTS  = öffentlicher Hostname (Schutz gegen DNS-Rebinding)
+#   MAIL_PUBLIC_URL     = https://<hostname> (Zählpixel, Links)
+#   MAIL_CRYPTO_KEY     = fester Schlüssel, sonst liegt er nur im Volume
+# Die Datei .env muss existieren (Vorlage: .env.example).
+#
+# SQLite läuft im WAL-Modus und wird von backend und mcp über dasselbe Volume
+# gemeinsam benutzt. Das ist in Ordnung, weil beide Container auf demselben
+# Host-Dateisystem liegen (WAL braucht gemeinsamen Shared-Memory, kein NFS).
+
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      BIND_HOST: 0.0.0.0
+      MAIL_TRUST_PROXY: "1"
+      MAIL_DATA_DIR: /data
+      # Healthcheck und MCP-Container erreichen den Server unter diesen Namen,
+      # unabhängig von MAIL_ALLOWED_HOSTS.
+      MAIL_INTERNAL_HOSTS: backend,127.0.0.1,localhost
+    volumes:
+      - mail-data:/data
+    # Kein Host-Port: nur über das Frontend (nginx) erreichbar.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional: MCP-Server im HTTP-Betrieb. Start mit
+  #   docker compose --profile mcp up -d
+  # MCP_TOKEN in .env ist Pflicht, sonst startet der Container nicht.
+  # MCP_ALLOWED_HOSTS (und ggf. MCP_ALLOWED_ORIGINS) passend setzen.
+  mcp:
+    build: ./backend
+    command: ["node", "src/mcp-server.js"]
+    profiles: [mcp]
+    env_file: .env
+    environment:
+      MCP_TRANSPORT: http
+      MCP_BIND_HOST: 0.0.0.0
+      MCP_PORT: "3010"
+      MAIL_DATA_DIR: /data
+      # Der MCP-Prozess erreicht den Web-Server (WhatsApp-Socket lebt nur dort).
+      MAIL_UI_URL: http://backend:3000
+      WA_AUTOSTART: "0"
+    volumes:
+      - mail-data:/data
+    ports:
+      - "${MCP_BIND:-127.0.0.1}:${MCP_PORT:-3010}:3010"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mail-data: {}

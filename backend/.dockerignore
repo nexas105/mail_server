@@ -1,0 +1,5 @@
+node_modules
+*.log
+# Echte Zugangsdaten gehören nicht ins Image
+accounts.seed.json
+.env*

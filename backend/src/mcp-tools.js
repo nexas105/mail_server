@@ -114,15 +114,21 @@ const attachmentSchema = z.object({
   mimetype: z.string().optional().describe('Standard: aus der Dateiendung abgeleitet'),
 }).describe('Datei-Anhang: entweder path (empfohlen) oder base64 + filename');
 
+/**
+ * Pfad für Fehlermeldungen. Über HTTP sitzt der Aufrufer woanders – der
+ * absolute Pfad verriete ihm Ordnerstruktur und Benutzername des Servers.
+ */
+const shownPath = file => (policy.transport === 'http' ? path.basename(file) : file);
+
 /** Liest einen Anhang aus path oder base64 und normalisiert ihn für db.addAttachment. */
 function readAttachment(a) {
   if (a.path) {
     // Die Richtlinie entscheidet, ob und aus welchem Ordner überhaupt gelesen werden darf.
     const file = resolveAttachmentPath(a.path);
-    if (!fs.existsSync(file)) throw new Error(`Datei nicht gefunden: ${file}`);
+    if (!fs.existsSync(file)) throw new Error(`Datei nicht gefunden: ${shownPath(file)}`);
     const stat = fs.statSync(file);
-    if (!stat.isFile()) throw new Error(`Kein reguläre Datei: ${file}`);
-    if (stat.size > ATTACH_MAX_BYTES) throw new Error(`Zu groß (${(stat.size / 1048576).toFixed(1)} MB, max. 20 MB): ${file}`);
+    if (!stat.isFile()) throw new Error(`Kein reguläre Datei: ${shownPath(file)}`);
+    if (stat.size > ATTACH_MAX_BYTES) throw new Error(`Zu groß (${(stat.size / 1048576).toFixed(1)} MB, max. 20 MB): ${shownPath(file)}`);
     const filename = a.filename || path.basename(file);
     return { filename, mimetype: a.mimetype || mimeForName(filename), base64: fs.readFileSync(file).toString('base64'), size: stat.size };
   }
@@ -477,12 +483,21 @@ tool(
 
 tool(
   'update_smtp_account',
-  'Aktualisiert einen SMTP-Account. Nur angegebene Felder ändern sich; Passwort nur setzen, wenn es geändert werden soll.',
+  'Aktualisiert einen SMTP-Account. Nur angegebene Felder ändern sich; Passwort nur setzen, wenn es '
+  + 'geändert werden soll. WICHTIG: Ein Server-Wechsel (host, port oder secure) geht nur zusammen mit '
+  + 'einem neuen password im selben Aufruf – sonst lehnt der Server die Änderung ab. Das verhindert, '
+  + 'dass ein gespeichertes Passwort unbemerkt an einen fremden Server geschickt wird. Gleiches gilt '
+  + 'für IMAP (imap_host/imap_port/imap_secure → imap_password) und CardDAV (carddav_url → carddav_password), '
+  + 'die in der Web-UI gepflegt werden.',
   {
     id: z.number().int(),
-    name: z.string().optional(), host: z.string().optional(), port: z.number().int().optional(),
-    secure: z.boolean().optional(), username: z.string().optional(),
-    password: z.string().optional(), from_name: z.string().optional(),
+    name: z.string().optional(),
+    host: z.string().optional().describe('SMTP-Server. Änderung nur zusammen mit password'),
+    port: z.number().int().optional().describe('Änderung nur zusammen mit password'),
+    secure: z.boolean().optional().describe('true = SSL/TLS, false = STARTTLS. Änderung nur zusammen mit password'),
+    username: z.string().optional(),
+    password: z.string().optional().describe('Neues Passwort (verschlüsselt gespeichert). Pflicht, wenn host/port/secure geändert werden'),
+    from_name: z.string().optional(),
     from_email: z.string().email().optional(), reply_to: z.string().optional(),
     default_header_template_id: z.number().int().nullable().optional(),
     default_footer_template_id: z.number().int().nullable().optional(),
@@ -649,12 +664,23 @@ tool(
 );
 tool(
   'get_message',
-  'Liefert eine empfangene Mail inkl. Text/HTML-Body.',
-  { id: z.number().int() },
-  async ({ id }) => {
+  'Liefert eine empfangene Mail inkl. Text/HTML-Body. Lesen verändert nichts – die Mail bleibt '
+  + 'ungelesen, solange nicht mark_seen=true gesetzt wird (oder set_message_flags genutzt wird).',
+  {
+    id: z.number().int(),
+    mark_seen: z.boolean().optional().default(false)
+      .describe('true = Mail dabei als gelesen markieren. Im Nur-Lesen-Betrieb ohne Wirkung.'),
+  },
+  async ({ id, mark_seen }) => {
     const m = db.getMessage(id);
     if (!m) return ok({ error: 'Mail nicht gefunden' });
-    db.setMessageSeen(id, true);
+    // Früher wurde hier immer als gelesen markiert – ein Schreibzugriff hinter
+    // einem get_-Werkzeug, den auch nur-lesende Token ausgelöst haben. Jetzt nur
+    // auf Wunsch, und nie, wenn Richtlinie oder Token nur lesen dürfen.
+    if (mark_seen && !readOnlySession && !policy.readonly) {
+      db.setMessageSeen(id, true);
+      m.seen = 1;
+    }
     return ok(m);
   },
 );

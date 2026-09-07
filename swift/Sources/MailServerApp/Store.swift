@@ -16,9 +16,11 @@ final class AppStore: ObservableObject {
         didSet { UserDefaults.standard.set(baseURL, forKey: "baseURL"); api.baseURL = baseURL }
     }
     /// Zugriffs-Token für den angemeldeten Server (Web-UI → Einstellungen → Zugriffs-Token).
+    /// Liegt in der Keychain, nicht in UserDefaults (Klartext-Plist).
     @Published var apiToken: String {
-        didSet { UserDefaults.standard.set(apiToken, forKey: "apiToken"); api.token = apiToken }
+        didSet { Keychain.write(apiToken, account: Self.tokenAccount); api.token = apiToken }
     }
+    private static let tokenAccount = "apiToken"
     @Published var toast: ToastMessage?
 
     // "system" | "light" | "dark"
@@ -37,7 +39,7 @@ final class AppStore: ObservableObject {
 
     init() {
         let stored = UserDefaults.standard.string(forKey: "baseURL") ?? "http://localhost:3000"
-        let storedToken = UserDefaults.standard.string(forKey: "apiToken") ?? ""
+        let storedToken = Self.loadToken()
         self.baseURL = stored
         self.apiToken = storedToken
         self.api = APIClient(baseURL: stored, token: storedToken)
@@ -45,11 +47,23 @@ final class AppStore: ObservableObject {
         self.projectRoot = UserDefaults.standard.string(forKey: "projectRoot") ?? Self.guessProjectRoot() ?? ""
     }
 
+    // Token aus der Keychain; Altbestand aus UserDefaults wird einmalig migriert und dort gelöscht.
+    private static func loadToken() -> String {
+        let defaults = UserDefaults.standard
+        if let legacy = defaults.string(forKey: tokenAccount) {
+            if !legacy.isEmpty, Keychain.read(tokenAccount) == nil {
+                Keychain.write(legacy, account: tokenAccount)
+            }
+            defaults.removeObject(forKey: tokenAccount)
+        }
+        return Keychain.read(tokenAccount) ?? ""
+    }
+
     // MARK: - Backend-Check & Start
-    // Sucht den Projekt-Root (enthält src/server.js) ausgehend vom Arbeitsverzeichnis.
+    // Sucht den Projekt-Root (enthält backend/src/server.js) ausgehend vom Arbeitsverzeichnis.
     static func guessProjectRoot() -> String? {
         let fm = FileManager.default
-        func hasServer(_ p: String) -> Bool { fm.fileExists(atPath: p + "/src/server.js") }
+        func hasServer(_ p: String) -> Bool { fm.fileExists(atPath: p + "/backend/src/server.js") }
         let cwd = fm.currentDirectoryPath
         var candidates = [cwd, (cwd as NSString).deletingLastPathComponent]
         // Ausführbare Datei liegt unter <root>/swift/.build/…/MailServerApp
@@ -63,7 +77,7 @@ final class AppStore: ObservableObject {
         do {
             let info = try await api.info()
             backend = .online
-            if projectRoot.isEmpty || !FileManager.default.fileExists(atPath: projectRoot + "/src/server.js") {
+            if projectRoot.isEmpty || !FileManager.default.fileExists(atPath: projectRoot + "/backend/src/server.js") {
                 projectRoot = info.projectRoot
             }
             return true
@@ -85,8 +99,8 @@ final class AppStore: ObservableObject {
 
     func startBackend() {
         guard !projectRoot.isEmpty else { error("Projektpfad unbekannt – bitte wählen"); return }
-        guard FileManager.default.fileExists(atPath: projectRoot + "/src/server.js") else {
-            error("src/server.js nicht gefunden unter \(projectRoot)"); return
+        guard FileManager.default.fileExists(atPath: projectRoot + "/backend/src/server.js") else {
+            error("backend/src/server.js nicht gefunden unter \(projectRoot)"); return
         }
         backend = .starting
         let p = Process()

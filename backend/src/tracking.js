@@ -63,15 +63,24 @@ const DAEMON_RE = /^(mailer-daemon|postmaster|mail|noreply|no-reply)@/i;
 const SUBJECT_RE = /(undeliverable|undelivered|delivery status notification|delivery failure|failure notice|returned mail|mail delivery (failed|subsystem)|delivery has failed|unzustellbar|nicht zustellbar|zustellung fehlgeschlagen)/i;
 const EMAIL_RE = /[\w.!#$%&'*+/=?^`{|}~-]+@[\w-]+(?:\.[\w-]+)+/g;
 
+/**
+ * Trägt die Mail einen echten Zustellbericht (RFC 3464)? Das ist das einzige
+ * Merkmal, das ein Absender nicht mit Betreff und Fließtext nachstellen kann,
+ * ohne den Bericht selbst zu bauen – deshalb entscheidet es später mit, ob
+ * eine Adresse aus dem Text als Bounce-Ziel überhaupt vertrauenswürdig ist.
+ */
+export function hasDeliveryReport(parsed = {}) {
+  const contentType = String(parsed.headers?.get?.('content-type')?.value || '');
+  return /multipart\/report/i.test(contentType)
+    || (parsed.attachments || []).some(a => /message\/delivery-status/i.test(a.contentType || ''));
+}
+
 /** Sieht diese eingegangene Mail nach einer Unzustellbarkeitsmeldung aus? */
 export function looksLikeBounce(parsed = {}) {
   const from = String(parsed.from?.value?.[0]?.address || '').toLowerCase();
   const subject = String(parsed.subject || '');
-  const contentType = String(parsed.headers?.get?.('content-type')?.value || '');
   const autoSubmitted = String(parsed.headers?.get?.('auto-submitted') || '');
-  const hasReport = /multipart\/report/i.test(contentType)
-    || (parsed.attachments || []).some(a => /message\/delivery-status/i.test(a.contentType || ''));
-  return hasReport
+  return hasDeliveryReport(parsed)
     || DAEMON_RE.test(from)
     || (SUBJECT_RE.test(subject) && (/auto-replied|auto-generated/i.test(autoSubmitted) || !!from))
     ;
@@ -87,28 +96,40 @@ function reportText(parsed = {}) {
   }
   const failed = parsed.headers?.get?.('x-failed-recipients');
   if (failed) parts.push(`X-Failed-Recipients: ${failed}`);
-  return parts.join('\n');
+  // Begrenzt: Die Regexes unten laufen über den ganzen Text, und die
+  // relevanten Kopfzeilen eines Berichts stehen ohnehin weit vorn.
+  return parts.join('\n').slice(0, 65536);
 }
 
 /**
  * Zerlegt eine Bounce-Meldung.
- * Gibt { email, code, type, reason, messageId } zurück – Felder, die sich nicht
- * sicher bestimmen lassen, bleiben null. Lieber unvollständig als geraten:
- * Das Ergebnis markiert einen Empfänger als unzustellbar.
+ * Gibt { email, code, type, reason, messageId, relayRecipientId, relayDraftId,
+ * structured } zurück – Felder, die sich nicht sicher bestimmen lassen, bleiben
+ * null. Lieber unvollständig als geraten: Das Ergebnis markiert einen Empfänger
+ * als unzustellbar. `structured` sagt, ob ein echter Zustellbericht vorliegt;
+ * ohne den ist `email` nur ein Fund im Fließtext und kein Beleg.
  */
 export function parseBounce(parsed = {}) {
   const body = reportText(parsed);
 
+  // Alle Muster erlauben am Zeilenanfang nur Leerzeichen/Tabs, nicht \s:
+  // \s* frisst mit /m auch Zeilenumbrüche und wird bei vielen Leerzeilen
+  // quadratisch langsam (32 KB Leerzeilen ≈ 0,6 s pro Muster).
   // Status: 5.1.1 → dauerhaft, 4.x.x → vorübergehend (Mailbox voll, Server down)
-  const status = body.match(/^\s*Status:\s*([245])\.(\d+)\.(\d+)/mi);
-  const diagnostic = body.match(/^\s*Diagnostic-Code:\s*(.+(?:\n[ \t]+.+)*)/mi);
-  const action = body.match(/^\s*Action:\s*(\w+)/mi);
+  const status = body.match(/^[ \t]*Status:\s*([245])\.(\d+)\.(\d+)/mi);
+  const diagnostic = body.match(/^[ \t]*Diagnostic-Code:\s*(.+(?:\n[ \t]+.+)*)/mi);
+  const action = body.match(/^[ \t]*Action:\s*(\w+)/mi);
 
   // Empfängeradresse: erst die maschinenlesbaren Felder, dann der Fließtext.
-  const finalRcpt = body.match(/^\s*(?:Final|Original)-Recipient:\s*(?:rfc822;)?\s*<?([^\s>;]+@[^\s>;]+)>?/mi)
-    || body.match(/^\s*X-Failed-Recipients:\s*<?([^\s>,;]+@[^\s>,;]+)>?/mi);
+  const finalRcpt = body.match(/^[ \t]*(?:Final|Original)-Recipient:\s*(?:rfc822;)?\s*<?([^\s>;]+@[^\s>;]+)>?/mi)
+    || body.match(/^[ \t]*X-Failed-Recipients:\s*<?([^\s>,;]+@[^\s>,;]+)>?/mi);
 
-  const messageId = (body.match(/^\s*(?:Original-)?Message-(?:ID|Id):\s*<([^>]+)>/mi) || [])[1] || null;
+  const messageId = (body.match(/^[ \t]*(?:Original-)?Message-(?:ID|Id):\s*<([^>]+)>/mi) || [])[1] || null;
+
+  // Unsere eigenen Kopfzeilen aus der zitierten Originalmail (message/rfc822-Teil).
+  // Sie benennen den Empfänger-Datensatz direkt – die verlässlichste Zuordnung.
+  const relayRecipientId = (body.match(/^[ \t]*X-Relay-Recipient:[ \t]*(\d+)[ \t\r]*$/mi) || [])[1] || null;
+  const relayDraftId = (body.match(/^[ \t]*X-Relay-Draft:[ \t]*(\d+)[ \t\r]*$/mi) || [])[1] || null;
 
   let email = finalRcpt ? finalRcpt[1] : null;
   if (!email) {
@@ -134,5 +155,8 @@ export function parseBounce(parsed = {}) {
       || String(parsed.subject || '').slice(0, 200)
       || null,
     messageId,
+    relayRecipientId: relayRecipientId ? Number(relayRecipientId) : null,
+    relayDraftId: relayDraftId ? Number(relayDraftId) : null,
+    structured: hasDeliveryReport(parsed),
   };
 }

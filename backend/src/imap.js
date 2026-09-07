@@ -16,8 +16,10 @@ function clientFor(account) {
     secure: c.secure,
     auth: { user: c.user, pass: c.pass },
     logger: false,
-    // Selbstsignierte Zertifikate lokaler Server nicht hart abweisen.
-    tls: { rejectUnauthorized: false },
+    // Zertifikat wird geprüft – sonst könnte sich jeder auf dem Weg als
+    // IMAP-Server ausgeben und das Passwort abgreifen. Für selbstsignierte
+    // Zertifikate lokaler Server: MAIL_IMAP_ALLOW_SELF_SIGNED=1.
+    tls: { rejectUnauthorized: process.env.MAIL_IMAP_ALLOW_SELF_SIGNED !== '1' },
   });
 }
 
@@ -132,19 +134,41 @@ export async function fetchInbox(account, { folder = 'INBOX', limit = 50, onProg
  * „wirklich zugestellt" – ohne das steht im Postausgang für immer „gesendet".
  *
  * Zuordnung in dieser Reihenfolge:
- *   1. Message-ID aus der zitierten Originalmail (eindeutig)
- *   2. Final-Recipient/X-Failed-Recipients → letzte gesendete Mail an die Adresse
- * Findet sich nichts, wird die Mail trotzdem als Bounce markiert – dann eben
- * ohne Zuordnung, statt sie stillschweigend als normale Mail abzulegen.
+ *   1. X-Relay-Recipient aus der zitierten Originalmail (unsere eigene ID;
+ *      die Adresse muss dazu passen, sonst gilt der Treffer nicht)
+ *   2. Message-ID aus der zitierten Originalmail (eindeutig)
+ *   3. Final-Recipient/X-Failed-Recipients → letzte gesendete Mail an die
+ *      Adresse – aber NUR, wenn ein echter Zustellbericht (multipart/report,
+ *      message/delivery-status) vorliegt.
+ * Ohne einen dieser Belege wird der Empfänger nicht angefasst: Sonst könnte
+ * jede Mail mit Betreff „Undeliverable" und einer Adresse im Text einen
+ * fremden Versand auf „fehlgeschlagen" setzen. Die Mail selbst wird trotzdem
+ * als Bounce markiert – dann eben ohne Zuordnung, statt sie stillschweigend
+ * als normale Mail abzulegen.
  */
 function noteBounce(account, folder, uid, parsed) {
   try {
     if (!parsed || !looksLikeBounce(parsed)) return false;
     const info = parseBounce(parsed);
     const stored = getMessageByUid(account.id, folder, uid);
-    const recipient = findSentRecipient({ email: info.email, messageId: info.messageId });
+
+    let recipient = null;
+    if (info.relayRecipientId) {
+      const byId = findSentRecipient({ email: null, recipientId: info.relayRecipientId });
+      // Die ID allein reicht nicht: Sie ist fortlaufend und damit erratbar.
+      if (byId && (!info.email || String(byId.email).toLowerCase() === info.email)) recipient = byId;
+    }
+    if (!recipient && info.messageId) {
+      recipient = findSentRecipient({ email: null, messageId: info.messageId });
+    }
+    if (!recipient && info.structured && info.email) {
+      recipient = findSentRecipient({ email: info.email });
+    }
+
     if (recipient) {
       recordBounce(recipient.id, { type: info.type, code: info.code, reason: info.reason });
+    } else {
+      console.log(`[bounce] unbestätigt, nicht zugeordnet (${info.email || 'ohne Adresse'}, uid ${uid})`);
     }
     if (stored) {
       markMessageBounce(stored.id, { draftId: recipient?.draft_id ?? null, email: info.email });

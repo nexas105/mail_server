@@ -387,7 +387,7 @@ export function Templates() {
               ? <><span className="brand-dot" style={{ background: brandSwatch(selectedBrand), display: 'inline-block', marginRight: 6 }} />{selectedBrand.name}</>
               : 'Beispieldaten'} · Betreff: {personalize(view === 'compose' ? composedSubject : form.subject, vars) || '(kein Betreff)'}
           </div>
-          <iframe className="preview" title="Vorlagen-Vorschau"
+          <iframe className="preview" title="Vorlagen-Vorschau" sandbox=""
             srcDoc={wrapPreviewHtml(personalize(view === 'compose' ? composedHtml : form.html, vars)) || '<div style="display:grid;place-items:center;height:100%;font:14px sans-serif;color:#777;text-align:center;padding:24px;box-sizing:border-box">Wähle einen Body aus, um die fertige E-Mail zu sehen.</div>'} />
         </div>
       </aside>
