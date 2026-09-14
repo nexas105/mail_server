@@ -1903,6 +1903,28 @@ export function setWaChatOldest(id, ts) {
   if (!cols.includes('transcript_error')) db.exec('ALTER TABLE wa_messages ADD COLUMN transcript_error TEXT');
 }
 
+// Einmal-Reparatur: Bis einschliesslich 09/2026 wurde der Chatname aus pushName
+// gesetzt, ohne auf fromMe zu pruefen. Bei eigenen Nachrichten ist pushName der
+// eigene Name, also hiess am Ende jeder Chat, in den man geschrieben hat, wie man
+// selbst. Die falschen Namen hier loeschen; der Kontakt-Sync fuellt den richtigen
+// Namen beim naechsten Lauf nach, bis dahin zeigen UI und MCP die Nummer.
+// Nur Einzelchats, nur exakte Treffer auf den eigenen Anzeigenamen.
+{
+  const done = db.prepare("SELECT value FROM settings WHERE key='wa_chatname_fromme_fix'").get();
+  if (!done) {
+    const accounts = db.prepare('SELECT id, push_name FROM wa_accounts WHERE push_name IS NOT NULL').all();
+    let cleared = 0;
+    for (const a of accounts) {
+      cleared += db.prepare(
+        'UPDATE wa_chats SET name=NULL WHERE wa_account_id=? AND is_group=0 AND name=?')
+        .run(a.id, a.push_name).changes;
+    }
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('wa_chatname_fromme_fix', ?)")
+      .run(new Date().toISOString());
+    if (cleared) console.log(`[migration] ${cleared} WhatsApp-Chatnamen zurueckgesetzt (eigener pushName)`);
+  }
+}
+
 const WA_MSG_LIST_COLS = `id, wa_account_id, chat_id, wa_id, chat_jid, sender_jid, sender_name,
   from_me, ts, type, snippet, quoted_wa_id, media_mime, media_size, media_filename,
   stored_path IS NOT NULL AS media_downloaded, status, origin, created_at,

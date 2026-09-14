@@ -272,8 +272,11 @@ function toRow(session, msg, { origin = null } = {}) {
   const isGroup = isJidGroup(jid);
   const snippet = snippetOf(d.type, d.body);
 
+  // pushName ist der Anzeigename des ABSENDERS. Bei eigenen Nachrichten ist das
+  // der eigene Name. Den als Chatnamen zu uebernehmen, benennt jeden Chat, in den
+  // man selbst schreibt, auf den eigenen Namen um. Deshalb nur bei eingehenden.
   const chat = db.upsertWaChat(session.id, {
-    jid, name: msg.pushName && !isGroup ? msg.pushName : undefined,
+    jid, name: (!msg.key?.fromMe && msg.pushName && !isGroup) ? msg.pushName : undefined,
     is_group: isGroup, last_message_ts: ts, last_snippet: snippet,
   });
   // Der Gruppenbetreff steht nicht in der Nachricht – einmal nachfragen,
