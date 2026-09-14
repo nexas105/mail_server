@@ -51,6 +51,65 @@ export async function listMailboxes(account) {
   }
 }
 
+/**
+ * Legt einen IMAP-Ordner an. Existiert er schon, ist das kein Fehler.
+ * Gibt { path, created } zurueck.
+ */
+export async function createMailbox(account, path) {
+  const target = String(path || '').trim();
+  if (!target) throw new Error('Kein Ordnername angegeben');
+  const client = clientFor(account);
+  await client.connect();
+  try {
+    const info = await client.mailboxCreate(target);
+    return { path: info?.path || target, created: true };
+  } catch (e) {
+    // ALREADYEXISTS ist der Normalfall beim zweiten Aufruf.
+    if (/alreadyexists|already exists/i.test(e.message || '')) return { path: target, created: false };
+    throw e;
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
+/**
+ * Verschiebt Mails serverseitig per IMAP von einem Ordner in einen anderen.
+ * `uids` sind die IMAP-UIDs im QUELLordner; im Zielordner vergibt der Server
+ * neue UIDs, die alten sind danach wertlos. Der Aufrufer muss die lokalen
+ * Zeilen deshalb verwerfen und den Zielordner bei Bedarf neu abrufen.
+ *
+ * Kann der Server MOVE nicht, faellt imapflow selbst auf COPY plus EXPUNGE
+ * zurueck; fuer den Aufrufer bleibt es dasselbe.
+ */
+export async function moveMessages(account, { folder = 'INBOX', uids = [], target, createTarget = false } = {}) {
+  const dest = String(target || '').trim();
+  if (!dest) throw new Error('Kein Zielordner angegeben');
+  if (dest === folder) throw new Error('Quell- und Zielordner sind identisch');
+  const list = [...new Set((uids || []).map(Number).filter(Number.isInteger))];
+  if (!list.length) return { moved: 0, uids: [], folder, target: dest };
+
+  if (createTarget) await createMailbox(account, dest);
+
+  const client = clientFor(account);
+  await client.connect();
+  const lock = await client.getMailboxLock(folder);
+  try {
+    await client.messageMove(list.join(','), dest, { uid: true });
+    return { moved: list.length, uids: list, folder, target: dest };
+  } catch (e) {
+    // Haeufigster Fall: der Zielordner existiert nicht. Das dem Aufrufer sagen,
+    // statt ihn mit "TRYCREATE" allein zu lassen.
+    if (/trycreate|nonexistent|does not exist/i.test(e.message || '')) {
+      throw new Error(`Zielordner "${dest}" existiert nicht. Mit create_target=true anlegen lassen `
+        + `oder list_mailboxes aufrufen, um die vorhandenen Ordner zu sehen.`);
+    }
+    throw e;
+  } finally {
+    lock.release();
+    await client.logout().catch(() => {});
+  }
+}
+
 function snippetOf(text, html) {
   const src = text || (html ? html.replace(/<[^>]+>/g, ' ') : '');
   return src.replace(/\s+/g, ' ').trim().slice(0, 200);

@@ -5,7 +5,7 @@ import path from 'node:path';
 import * as db from './db.js';
 import { sendDraft, renderPreview, verifyAccount, sendTestMail, preflightDraft } from './mailer.js';
 import { fetchContacts } from './carddav.js';
-import { fetchInbox, verifyImap } from './imap.js';
+import { fetchInbox, verifyImap, listMailboxes, createMailbox, moveMessages } from './imap.js';
 import * as gh from './github.js';
 import { policy, assertToolAllowed, resolveAttachmentPath } from './mcp-policy.js';
 import { getServiceToken } from './auth.js';
@@ -1380,6 +1380,94 @@ tool(
   + 'kommt beim nächsten Abruf ggf. wieder.',
   { id: z.number().int() },
   async ({ id }) => ok({ deleted: db.deleteMessage(id) }),
+);
+
+tool(
+  'list_mailboxes',
+  'Welche Ordner liegen auf dem MAIL-SERVER? Anders als list_message_folders, das nur die lokal '
+  + 'gespeicherten Ordner zeigt. Liefert Pfad, Name, Trennzeichen und specialUse (Posteingang, '
+  + 'Gesendet, Entwuerfe, Archiv, Spam, Papierkorb). Der Pfad ist der Schluessel fuer move_messages.',
+  { account_id: z.number().int().describe('Account-ID aus list_smtp_accounts (muss IMAP konfiguriert haben)') },
+  async ({ account_id }) => {
+    const account = db.getAccount(account_id);
+    if (!account) return ok({ error: 'Account nicht gefunden' });
+    if (!account.imap_host) return ok({ error: 'Kein IMAP-Host konfiguriert' });
+    return ok({ account_id, mailboxes: await listMailboxes(account) });
+  },
+);
+
+tool(
+  'create_mailbox',
+  'Legt einen Ordner auf dem Mail-Server an, z.B. "Werbung". Verschachtelt wird mit dem '
+  + 'Trennzeichen des Servers geschrieben, das list_mailboxes als delimiter ausweist, etwa '
+  + '"INBOX/Werbung". Existiert der Ordner schon, passiert nichts.',
+  {
+    account_id: z.number().int(),
+    path: z.string().min(1).describe('Ordnerpfad, z.B. "Werbung" oder "INBOX/Werbung"'),
+  },
+  async ({ account_id, path: mailboxPath }) => {
+    const account = db.getAccount(account_id);
+    if (!account) throw new Error('Account nicht gefunden');
+    if (!account.imap_host) throw new Error('Kein IMAP-Host konfiguriert');
+    return ok(await createMailbox(account, mailboxPath));
+  },
+);
+
+tool(
+  'move_messages',
+  'Verschiebt empfangene Mails auf dem MAIL-SERVER in einen anderen Ordner, z.B. Werbung aus dem '
+  + 'Posteingang heraus. Anders als delete_message wirkt das auf dem Server und haelt auch beim '
+  + 'naechsten Abruf. Die Mails werden dabei aus dem lokalen Posteingang entfernt, weil der Server '
+  + 'im Zielordner neue UIDs vergibt; mit sync_inbox auf den Zielordner holt man sie wieder herein. '
+  + 'Zielordner vorher mit list_mailboxes pruefen oder create_target=true setzen.',
+  {
+    ids: z.array(z.number().int()).min(1).max(500).describe('ids aus list_inbox'),
+    target: z.string().min(1).describe('Zielordner, z.B. "Werbung"'),
+    create_target: z.boolean().optional().default(false)
+      .describe('Zielordner anlegen, falls er noch nicht existiert'),
+  },
+  async ({ ids, target, create_target }) => {
+    // Nach Konto und Quellordner buendeln: eine IMAP-Verbindung pro Gruppe statt
+    // pro Mail, und ein Zielordner kann je Konto etwas anderes bedeuten.
+    const groups = new Map();
+    const missing = [];
+    for (const id of ids) {
+      const m = db.getMessage(id);
+      if (!m) { missing.push(id); continue; }
+      const key = `${m.account_id}::${m.folder}`;
+      if (!groups.has(key)) groups.set(key, { account_id: m.account_id, folder: m.folder, rows: [] });
+      groups.get(key).rows.push(m);
+    }
+    if (!groups.size) return ok({ moved: 0, target, missing, error: 'Keine der ids gefunden' });
+
+    const results = [];
+    let moved = 0;
+    let createdOnce = false;
+    for (const g of groups.values()) {
+      const account = db.getAccount(g.account_id);
+      if (!account?.imap_host) {
+        results.push({ account_id: g.account_id, folder: g.folder, moved: 0, error: 'Kein IMAP-Host konfiguriert' });
+        continue;
+      }
+      try {
+        const r = await moveMessages(account, {
+          folder: g.folder,
+          uids: g.rows.map(m => m.uid),
+          target,
+          createTarget: create_target && !createdOnce,
+        });
+        createdOnce = createdOnce || create_target;
+        // Erst nach erfolgreichem Verschieben lokal aufraeumen. Schlaegt der Zug
+        // fehl, bleibt der lokale Stand so, wie der Server ihn auch sieht.
+        for (const m of g.rows) db.deleteMessage(m.id);
+        moved += r.moved;
+        results.push({ account_id: g.account_id, folder: g.folder, moved: r.moved });
+      } catch (e) {
+        results.push({ account_id: g.account_id, folder: g.folder, moved: 0, error: e.message });
+      }
+    }
+    return ok({ moved, target, groups: results, missing, inbox_link: `${LINK}/inbox` });
+  },
 );
 
 tool(
