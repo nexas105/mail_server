@@ -4,6 +4,7 @@ import {
   getImapCreds, insertMessage, maxMessageUid,
   getMessageByUid, findSentRecipient, recordBounce, markMessageBounce, recipientAccountId,
 } from './db.js';
+import { parseReferences } from './reply.js';
 import { looksLikeBounce, parseBounce } from './tracking.js';
 
 // Baut einen IMAP-Client aus den Account-Zugangsdaten (IMAP-spezifisch, sonst SMTP-Fallback).
@@ -110,6 +111,60 @@ export async function moveMessages(account, { folder = 'INBOX', uids = [], targe
   }
 }
 
+/**
+ * Setzt oder entfernt IMAP-Flags serverseitig, z.B. \\Answered nach einer
+ * Antwort. Ohne das sieht jedes andere Mailprogramm die Mail weiter als
+ * unbeantwortet – der lokale Merker allein bleibt in dieser App gefangen.
+ */
+export async function setFlags(account, { folder = 'INBOX', uids = [], add = [], remove = [] } = {}) {
+  const list = [...new Set((uids || []).map(Number).filter(Number.isInteger))];
+  if (!list.length || (!add.length && !remove.length)) return { changed: 0 };
+  const client = clientFor(account);
+  await client.connect();
+  const lock = await client.getMailboxLock(folder);
+  try {
+    if (add.length) await client.messageFlagsAdd(list.join(','), add, { uid: true });
+    if (remove.length) await client.messageFlagsRemove(list.join(','), remove, { uid: true });
+    return { changed: list.length, folder, add, remove };
+  } finally {
+    lock.release();
+    await client.logout().catch(() => {});
+  }
+}
+
+/**
+ * Findet den Ordner "Gesendet" eines Kontos. Bevorzugt wird die
+ * SPECIAL-USE-Auszeichnung \\Sent des Servers; erst wenn der Server keine
+ * liefert, wird nach den ueblichen Namen geraten. Ohne Treffer: null – dann
+ * wird eben keine Kopie abgelegt, statt einen Ordner zu erfinden.
+ */
+export async function sentMailbox(account) {
+  const boxes = await listMailboxes(account);
+  const special = boxes.find(b => b.specialUse === '\\Sent');
+  if (special) return special.path;
+  const guess = /^(sent|sent items|sent messages|gesendet|gesendete objekte|gesendete elemente|invio|enviados)$/i;
+  return boxes.find(b => guess.test(b.name) || guess.test(b.path))?.path || null;
+}
+
+/**
+ * Legt eine fertige MIME-Nachricht in einem Ordner ab (IMAP APPEND).
+ * Gebraucht fuer gesendete Antworten: der Versand laeuft ueber SMTP, davon
+ * merkt sich das Postfach nichts. Ohne Kopie fehlt die eigene Antwort im
+ * Gespraechsfaden, sobald der Nutzer sein normales Mailprogramm oeffnet.
+ */
+export async function appendMessage(account, { folder, raw, flags = ['\\Seen'], date = new Date() } = {}) {
+  if (!folder) throw new Error('Kein Zielordner angegeben');
+  if (!raw) throw new Error('Keine Nachricht angegeben');
+  const client = clientFor(account);
+  await client.connect();
+  try {
+    const info = await client.append(folder, raw, flags, date);
+    return { folder, uid: info?.uid ?? null };
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
 function snippetOf(text, html) {
   const src = text || (html ? html.replace(/<[^>]+>/g, ' ') : '');
   return src.replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -155,6 +210,14 @@ export async function fetchInbox(account, { folder = 'INBOX', limit = 50, onProg
         const text = parsed.text || null;
         const seen = msg.flags ? msg.flags.has('\\Seen') : false;
         const flagged = msg.flags ? msg.flags.has('\\Flagged') : false;
+        const answered = msg.flags ? msg.flags.has('\\Answered') : false;
+        // Fuer spaetere Antworten: Rueckadresse, Mitleser und die bisherige
+        // References-Kette. Wird das hier nicht gespeichert, laesst sich eine
+        // Antwort nachtraeglich nicht mehr in den Gespraechsfaden einhaengen.
+        const replyToText = parsed.replyTo?.text
+          || (env.replyTo || []).map(a => (a.name ? `"${a.name}" <${a.address}>` : a.address)).join(', ')
+          || null;
+        const chain = [...parseReferences(parsed.references), ...parseReferences(parsed.inReplyTo || env.inReplyTo)];
         const isNew = insertMessage({
           account_id: account.id,
           folder,
@@ -163,6 +226,10 @@ export async function fetchInbox(account, { folder = 'INBOX', limit = 50, onProg
           from_name: fromAddr.name || null,
           from_email: fromAddr.address || null,
           to_text: parsed.to?.text || (env.to || []).map(a => a.address).join(', ') || null,
+          cc_text: parsed.cc?.text || (env.cc || []).map(a => a.address).join(', ') || null,
+          reply_to: replyToText,
+          refs: chain.length ? [...new Set(chain)].join(' ') : null,
+          answered,
           subject: env.subject || parsed.subject || '(kein Betreff)',
           date: (env.date || parsed.date || new Date(0)).toISOString?.() || null,
           snippet: snippetOf(text, html),

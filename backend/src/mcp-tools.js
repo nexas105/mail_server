@@ -6,6 +6,7 @@ import * as db from './db.js';
 import { sendDraft, renderPreview, verifyAccount, sendTestMail, preflightDraft } from './mailer.js';
 import { fetchContacts } from './carddav.js';
 import { fetchInbox, verifyImap, listMailboxes, createMailbox, moveMessages } from './imap.js';
+import { createReplyDraft } from './reply.js';
 import * as gh from './github.js';
 import { policy, assertToolAllowed, resolveAttachmentPath } from './mcp-policy.js';
 import { getServiceToken } from './auth.js';
@@ -1472,33 +1473,61 @@ tool(
 
 tool(
   'reply_to_message',
-  'Legt einen Antwort-Entwurf auf eine empfangene Mail an: Betreff mit Re:, Empfänger und Account '
-  + 'übernommen, Originaltext als Zitat unten. Gesendet wird nichts – der Entwurf landet in der UI.',
+  'Antwortet auf eine empfangene Mail – als ECHTE Antwort: Betreff mit Re:, Zieladresse aus '
+  + 'Reply-To bzw. Absender, Originaltext als Zitat und vor allem die Kopfzeilen In-Reply-To und '
+  + 'References, damit die Antwort beim Empfänger im selben Gesprächsfaden hängt. '
+  + 'Standardmäßig entsteht nur ein Entwurf, den der Nutzer in der Oberfläche prüft und abschickt. '
+  + 'Mit send=true geht die Antwort sofort raus (derselbe Vorflug-Check wie send_draft); das '
+  + 'Original wird dann als beantwortet markiert und eine Kopie landet im Ordner „Gesendet".',
   {
     message_id: z.number().int().describe('id aus list_inbox'),
     html: z.string().optional().describe('Antworttext als HTML; ohne Angabe entsteht ein Gerüst'),
+    text: z.string().optional().describe('Optionaler Nur-Text-Teil; sonst aus dem HTML erzeugt'),
+    subject: z.string().optional().describe('Eigener Betreff; sonst "Re: <Originalbetreff>"'),
     quote: z.boolean().optional().default(true).describe('Original als Zitat anhängen'),
+    reply_all: z.boolean().optional().default(false)
+      .describe('Auch die übrigen Empfänger der Originalmail auf Cc setzen (ohne die eigene Adresse)'),
+    cc: z.array(z.string()).optional().describe('Zusätzliche Cc-Adressen'),
+    send: z.boolean().optional().default(false)
+      .describe('Sofort senden statt nur einen Entwurf anzulegen – nur auf ausdrücklichen Wunsch'),
   },
-  async ({ message_id, html, quote }) => {
-    const m = db.getMessage(message_id);
-    if (!m) throw new Error('Nachricht nicht gefunden');
-    if (!m.from_email) throw new Error('Die Mail hat keine Absender-Adresse');
-    const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-    const original = m.text || m.snippet || '';
-    const quoted = quote && original
-      ? `<hr><p style="color:#777;font-size:13px">Am ${m.date || ''} schrieb ${esc(m.from_name || m.from_email)}:</p>`
-        + `<blockquote style="margin:12px 0;padding:8px 14px;border-left:2px solid #ccc;color:#555;white-space:pre-wrap">`
-        + `${esc(original.slice(0, 4000))}</blockquote>`
-      : '';
-    const subject = /^re:/i.test(m.subject || '') ? m.subject : `Re: ${m.subject || ''}`;
-    const draft = db.createDraft({
-      account_id: m.account_id,
-      subject,
-      html: (html || '<p>Hallo {{name}},</p>\n<p>…</p>') + quoted,
-      mode: 'batch',
-      recipients: [{ email: m.from_email, name: m.from_name || null, kind: 'to' }],
+  async ({ message_id, html, text, subject, quote, reply_all, cc, send }) => {
+    const { draft, message, to, cc: ccList, threaded } = createReplyDraft(message_id, {
+      html: html ?? null, text: text ?? null, subject: subject ?? null,
+      quote, replyAll: reply_all, cc: cc || [],
     });
-    return ok({ draft_id: draft.id, subject, to: m.from_email, open_in_ui: draftLink(draft.id) });
+    const base = {
+      draft_id: draft.id,
+      subject: draft.subject,
+      to: to.map(a => a.email),
+      cc: ccList.map(a => a.email),
+      // Sichtbar machen, ob die Antwort wirklich im Faden landet: ohne
+      // Message-ID am Original geht das nicht, und das soll der Aufrufer
+      // wissen, statt es anzunehmen.
+      threaded,
+      in_reply_to: draft.in_reply_to,
+      ...(threaded ? {} : { note: 'Die Originalmail hat keine Message-ID – die Antwort kann nicht in den Gesprächsfaden eingehängt werden.' }),
+      open_in_ui: draftLink(draft.id),
+    };
+    if (!send) return ok({ ...base, sent: false, hint: 'Zum Abschicken send_draft aufrufen oder reply_to_message mit send=true.' });
+
+    const check = preflightDraft(draft.id);
+    if (!check.ok) {
+      return ok({
+        ...base, sent: false, blocked: true,
+        reason: 'Vorflug-Check hat den Versand blockiert',
+        blockers: check.blockers, duplicates: check.duplicates, unresolved: check.unresolved,
+        hint: 'Entwurf ist angelegt; Ursachen beheben (preflight_draft) und send_draft aufrufen.',
+      });
+    }
+    const result = await sendDraft(draft.id);
+    return ok({
+      ...base, sent: result.totalSent > 0, status: result.status,
+      answered_on_server: result.reply?.answered ?? false,
+      copy_in_sent: result.reply?.copied ?? false,
+      warnings: check.warnings,
+      original: { id: message.id, subject: message.subject, from: message.from_email },
+    });
   },
 );
 

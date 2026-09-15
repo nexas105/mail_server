@@ -62,9 +62,10 @@ const GROUPS: { title: string; icon: IconName; note: string; names: string[] }[]
   },
   {
     title: 'Posteingang & Protokoll', icon: 'inbox',
-    note: 'Empfangenes lesen und nachsehen, was wann rausging.',
+    note: 'Empfangenes lesen, im Gesprächsfaden antworten und nachsehen, was wann rausging.',
     names: ['sync_inbox', 'list_inbox', 'list_message_folders', 'get_message', 'reply_to_message',
-      'set_message_flags', 'delete_message', 'list_send_events'],
+      'set_message_flags', 'delete_message', 'list_mailboxes', 'create_mailbox', 'move_messages',
+      'list_send_events'],
   },
   {
     title: 'GitHub an Kontakten', icon: 'git',
@@ -268,7 +269,8 @@ MAIL_WA_MCP_SEND=1                                # erst damit darf die KI Whats
           damit für jeden Client gleichermaßen.
         </p>
         <ul className="muted small guide-list">
-          <li><strong>E-Mail geht nicht von allein raus.</strong> <code>create_draft</code> legt nur an. Nur <code>send_draft</code> sendet — und das benutzt ein Assistent, wenn du es verlangst.</li>
+          <li><strong>E-Mail geht nicht von allein raus.</strong> <code>create_draft</code> und <code>reply_to_message</code> legen nur an. Gesendet wird ausschließlich über <code>send_draft</code> oder <code>reply_to_message</code> mit <code>send=true</code> — und das benutzt ein Assistent, wenn du es verlangst. Vorher läuft in beiden Fällen derselbe Vorflug-Check wie in der Oberfläche.</li>
+          <li><strong>Antworten bleiben im Gesprächsfaden.</strong> <code>reply_to_message</code> setzt <code>In-Reply-To</code> und <code>References</code>, adressiert nach <code>Reply-To</code> statt blind an den Absender und markiert das Original nach dem Senden auf dem Mail-Server als beantwortet. Eine Kopie legt es in „Gesendet" ab, damit die Antwort auch im normalen Mailprogramm steht.</li>
           <li><strong>WhatsApp sendet nur mit doppelter Freigabe.</strong> <code>MAIL_WA_MCP_SEND=1</code> in der Umgebung <em>und</em> der Modus am Konto. Im empfohlenen Modus darf die KI nur in Chats antworten, in denen schon jemand geschrieben hat.</li>
           <li><strong>Zugangsdaten bleiben drin.</strong> SMTP-, IMAP- und GitHub-Zugänge sind AES-256-GCM-verschlüsselt; kein Werkzeug gibt sie zurück.</li>
           <li><strong>Werkzeuge lassen sich beschneiden.</strong> Abgeschaltete Werkzeuge werden gar nicht erst registriert und tauchen in <code>tools/list</code> nicht auf.</li>

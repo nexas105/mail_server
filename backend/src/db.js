@@ -230,6 +230,17 @@ for (const [table, col, def] of [
   ['messages', 'is_bounce', 'INTEGER NOT NULL DEFAULT 0'],
   ['messages', 'bounce_draft_id', 'INTEGER'],
   ['messages', 'bounce_email', 'TEXT'],
+  // Fuer echte Antworten: Rueckadresse, Mitleser und die Kette der
+  // Message-IDs. Ohne die Kette ist eine Antwort beim Empfaenger nur eine
+  // neue Mail mit "Re:" im Betreff, kein Beitrag zum Gespraech.
+  ['messages', 'reply_to', 'TEXT'],
+  ['messages', 'cc_text', 'TEXT'],
+  ['messages', 'refs', 'TEXT'],            // References-Kette der Originalmail
+  ['messages', 'answered', 'INTEGER NOT NULL DEFAULT 0'],
+  // Entwurf als Antwort: worauf, in welchem Gespraech.
+  ['drafts', 'reply_message_id', 'INTEGER'],  // messages.id der Originalmail
+  ['drafts', 'in_reply_to', 'TEXT'],          // Message-ID der Originalmail
+  ['drafts', 'refs', 'TEXT'],                 // References fuer die Antwort
   ['drafts', 'track_opens', 'INTEGER'],       // NULL = globale Einstellung
 ]) {
   try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`); }
@@ -496,10 +507,11 @@ export function createDraft(d) {
   const varsJson = vars && typeof vars === 'object' ? JSON.stringify(vars) : (vars ?? null);
   const headerSnapshot = headerId ? (getTemplate(headerId)?.html || null) : (d.header_html || null);
   const footerSnapshot = footerId ? (getTemplate(footerId)?.html || null) : (d.footer_html || null);
-  const r = db.prepare(`INSERT INTO drafts (account_id, subject, html, text, mode, reply_to, header_template_id, footer_template_id, header_html, footer_html, vars)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  const r = db.prepare(`INSERT INTO drafts (account_id, subject, html, text, mode, reply_to, header_template_id, footer_template_id, header_html, footer_html, vars, reply_message_id, in_reply_to, refs)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     d.account_id ?? null, d.subject ?? '', d.html ?? '', d.text ?? '', d.mode ?? 'batch', d.reply_to || null,
-    headerId, footerId, headerSnapshot, footerSnapshot, varsJson);
+    headerId, footerId, headerSnapshot, footerSnapshot, varsJson,
+    d.reply_message_id ?? null, d.in_reply_to || null, d.refs || null);
   const id = r.lastInsertRowid;
   if (Array.isArray(d.recipients)) addRecipients(id, d.recipients);
   return getDraft(id);
@@ -643,10 +655,11 @@ export function deleteDraft(id) {
 export function duplicateDraft(id) {
   const d = getDraft(id);
   if (!d) return null;
-  const r = db.prepare(`INSERT INTO drafts (account_id, subject, html, text, mode, reply_to, header_template_id, footer_template_id, header_html, footer_html)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+  const r = db.prepare(`INSERT INTO drafts (account_id, subject, html, text, mode, reply_to, header_template_id, footer_template_id, header_html, footer_html, reply_message_id, in_reply_to, refs)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     d.account_id, d.subject, d.html, d.text, d.mode, d.reply_to,
-    d.header_template_id, d.footer_template_id, d.header_html, d.footer_html);
+    d.header_template_id, d.footer_template_id, d.header_html, d.footer_html,
+    d.reply_message_id, d.in_reply_to, d.refs);
   const newId = r.lastInsertRowid;
   addRecipients(newId, d.recipients.map(x => ({ email: x.email, name: x.name, kind: x.kind, vars: x.vars ?? undefined })));
   return getDraft(newId);
@@ -1061,12 +1074,14 @@ export function deleteAsset(id) {
 // (idempotenter Sync). Gibt true zurück, wenn eine neue Zeile angelegt wurde.
 export function insertMessage(m) {
   const r = db.prepare(`INSERT OR IGNORE INTO messages
-    (account_id, folder, uid, message_id, from_name, from_email, to_text, subject, date, snippet, text, html, seen, flagged)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    (account_id, folder, uid, message_id, from_name, from_email, to_text, cc_text, reply_to,
+     refs, subject, date, snippet, text, html, seen, flagged, answered)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
     m.account_id, m.folder || 'INBOX', m.uid, m.message_id ?? null,
     m.from_name ?? null, m.from_email ?? null, m.to_text ?? null,
+    m.cc_text ?? null, m.reply_to ?? null, m.refs ?? null,
     m.subject ?? null, m.date ?? null, m.snippet ?? null,
-    m.text ?? null, m.html ?? null, m.seen ? 1 : 0, m.flagged ? 1 : 0);
+    m.text ?? null, m.html ?? null, m.seen ? 1 : 0, m.flagged ? 1 : 0, m.answered ? 1 : 0);
   return r.changes > 0;
 }
 // Höchste bereits gespeicherte UID eines Ordners (für inkrementellen Abruf).
@@ -1076,7 +1091,7 @@ export function maxMessageUid(accountId, folder = 'INBOX') {
 }
 // Liste ohne die schweren Felder (text/html) — für die Übersicht.
 export function listMessages({ accountId = null, folder = 'INBOX', limit = 100 } = {}) {
-  const cols = 'id, account_id, folder, uid, message_id, from_name, from_email, to_text, subject, date, snippet, seen, flagged, created_at';
+  const cols = 'id, account_id, folder, uid, message_id, from_name, from_email, to_text, subject, date, snippet, seen, flagged, answered, created_at';
   const rows = accountId && folder
     ? db.prepare(`SELECT ${cols} FROM messages WHERE account_id=? AND folder=? ORDER BY COALESCE(date, created_at) DESC LIMIT ?`).all(accountId, folder, limit)
     : accountId
@@ -1101,6 +1116,11 @@ export function setMessageSeen(id, seen = true) {
 }
 export function setMessageFlagged(id, flagged = true) {
   return db.prepare('UPDATE messages SET flagged=? WHERE id=?').run(flagged ? 1 : 0, id).changes > 0;
+}
+// Beantwortet-Merker. Entspricht dem IMAP-Flag \Answered; die Oberflaeche
+// zeigt damit, worauf schon geantwortet wurde.
+export function setMessageAnswered(id, answered = true) {
+  return db.prepare('UPDATE messages SET answered=? WHERE id=?').run(answered ? 1 : 0, id).changes > 0;
 }
 export function deleteMessage(id) {
   return db.prepare('DELETE FROM messages WHERE id=?').run(id).changes > 0;

@@ -21,6 +21,7 @@ import { sendDraft, sendTestMail, renderPreview, verifyAccount, preflightDraft }
 import { fetchContacts } from './carddav.js';
 import { parseVcf, contactsToVcf } from './vcard.js';
 import { fetchInbox, verifyImap, listMailboxes } from './imap.js';
+import { createReplyDraft } from './reply.js';
 import * as gh from './github.js';
 import * as wa from './whatsapp.js';
 import { subscribe, ping as waPing, closeAllStreams, emit as waEmit } from './wa-bus.js';
@@ -609,6 +610,18 @@ app.post('/api/messages/:id/flag', wrap((req, res) => res.json({
   ok: db.setMessageFlagged(+req.params.id, req.body?.flagged !== false),
 })));
 app.delete('/api/messages/:id', wrap((req, res) => res.json({ ok: db.deleteMessage(+req.params.id) })));
+// Antwort-Entwurf anlegen. Bewusst hier und nicht im Browser gebaut: nur der
+// Server kennt Reply-To, Cc und die References-Kette der Originalmail, und nur
+// am Entwurf gespeichert überleben sie bis zum Versand.
+app.post('/api/messages/:id/reply', wrap((req, res) => {
+  const { draft, to, cc, threaded } = createReplyDraft(+req.params.id, {
+    html: req.body?.html ?? null,
+    quote: req.body?.quote !== false,
+    replyAll: !!req.body?.reply_all,
+    cc: req.body?.cc || [],
+  });
+  res.json({ draft, to, cc, threaded });
+}));
 
 // ---- Drafts ---------------------------------------------------------------
 app.get('/api/drafts', wrap((req, res) => res.json(db.listDrafts(req.query.status))));

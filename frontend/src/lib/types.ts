@@ -35,6 +35,9 @@ export interface Message {
   from_name: string | null;
   from_email: string | null;
   to_text: string | null;
+  cc_text?: string | null;
+  reply_to?: string | null;
+  refs?: string | null;          // References-Kette der Mail (fuer Antworten)
   subject: string | null;
   date: string | null;
   snippet: string | null;
@@ -42,6 +45,7 @@ export interface Message {
   html?: string | null;
   seen: 0 | 1;
   flagged: 0 | 1;
+  answered?: 0 | 1;
   created_at: string;
 }
 
@@ -93,6 +97,10 @@ export interface Draft {
   opened_count?: number;
   bounced_count?: number;
   track_opens?: 0 | 1 | null;   // null = globale Einstellung
+  // Antwort auf eine empfangene Mail: Bezug und Gespraechsfaden.
+  reply_message_id?: number | null;
+  in_reply_to?: string | null;
+  refs?: string | null;
   account?: Account | null;
 }
 

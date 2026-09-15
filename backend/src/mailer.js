@@ -3,10 +3,11 @@ import {
   getAccount, decrypt, getDraft, getRecipients,
   setDraftStatus, setRecipientResult, logSendEvent, attachmentsForSend, composeDraftHtml,
   getCustomFieldDefaults, getAsset, listAttachments, hasSuccessfulTestSend,
-  getAllSettings, setRecipientToken, ensureRelayRef,
+  getAllSettings, setRecipientToken, ensureRelayRef, getMessage, setMessageAnswered,
 } from './db.js';
 import { newTrackingToken, withPixel, trackingBaseUrl, opensEnabledGlobally } from './tracking.js';
 import { isPrivateHost } from './net-guard.js';
+import { setFlags, sentMailbox, appendMessage } from './imap.js';
 
 // Umschließt das fertige Mail-HTML mit einem mobil-optimierten Dokument:
 // viewport (Gerätebreite statt Schrumpfen), fluide Bilder und ein stabiler
@@ -91,6 +92,58 @@ function transportFor(account) {
   return t;
 }
 
+// Baut eine Nachricht nur zusammen, ohne sie zu verschicken – Ergebnis ist die
+// fertige MIME-Quelle. Gebraucht für Antworten: dieselbe Quelle geht per SMTP
+// raus UND als Kopie in den Ordner „Gesendet". Zwei getrennte Aufbauten hätten
+// zwei verschiedene Message-IDs, und die Kopie fiele aus dem Gesprächsfaden.
+let composerTransport = null;
+function composer() {
+  if (!composerTransport) composerTransport = nodemailer.createTransport({ streamTransport: true, buffer: true });
+  return composerTransport;
+}
+
+/**
+ * Verschickt eine Nachricht. Mit `keepRaw` wird sie vorher zusammengebaut und
+ * als fertige Quelle übergeben; der Aufrufer bekommt sie in `raw` zurück.
+ */
+async function deliver(transport, message, keepRaw = false) {
+  if (!keepRaw) return transport.sendMail(message);
+  const built = await composer().sendMail(message);
+  const info = await transport.sendMail({ envelope: built.envelope, raw: built.message });
+  return { ...info, messageId: built.messageId, raw: built.message };
+}
+
+/**
+ * Nachbereitung einer gesendeten Antwort: Original als beantwortet markieren
+ * (lokal und per IMAP \\Answered) und eine Kopie in „Gesendet" ablegen.
+ *
+ * Schlägt einer der beiden IMAP-Schritte fehl, ist die Antwort trotzdem beim
+ * Empfänger – deshalb wird hier nur protokolliert und nicht geworfen.
+ */
+async function archiveReply(account, draft, raw) {
+  const original = draft.reply_message_id ? getMessage(draft.reply_message_id) : null;
+  if (original) setMessageAnswered(original.id, true);
+  // `answered`/`copied` melden ausschließlich, was auf dem Mail-Server passiert
+  // ist. Ohne IMAP-Zugang passiert dort nichts – dann eben false, statt einen
+  // Erfolg zu behaupten, den nur die lokale Datenbank kennt.
+  if (!account?.imap_host) return { answered: false, copied: false };
+  let answered = false, copied = false;
+  if (original) {
+    try {
+      await setFlags(account, { folder: original.folder, uids: [original.uid], add: ['\\Answered'] });
+      answered = true;
+    } catch (e) { console.error('[reply] \\Answered konnte nicht gesetzt werden:', e.message); }
+  }
+  if (raw) {
+    try {
+      const folder = await sentMailbox(account);
+      if (folder) { await appendMessage(account, { folder, raw }); copied = true; }
+      else console.log('[reply] kein Ordner „Gesendet" gefunden – keine Kopie abgelegt');
+    } catch (e) { console.error('[reply] Kopie in „Gesendet" fehlgeschlagen:', e.message); }
+  }
+  return { answered, copied };
+}
+
 /** Adressobjekt für nodemailer – das übernimmt Quoting/Encoding des Namens,
  *  statt dass ein Name mit Anführungszeichen oder „<“ den Header zerlegt. */
 const addr = r => (r.name ? { name: r.name, address: r.email } : r.email);
@@ -109,15 +162,30 @@ export function personalize(str, vars) {
 }
 
 // Naive HTML -> text fallback when no plain text is provided.
+// <blockquote> wird mit „> " markiert: im Nur-Text-Teil einer Antwort ist das
+// der einzige Hinweis darauf, wo das Zitat anfängt – ohne ihn liest sich die
+// zitierte Originalmail wie eigener Text.
 function htmlToText(html) {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
+  const plain = fragment => fragment
     .replace(/<\/(p|div|h[1-6]|li|tr|br)>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  return plain(html
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ''))
+    .replace(/\u0000/g, '')
     .replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// Wie htmlToText, aber Zitatblöcke bekommen ihr „> ". Getrennt gehalten, weil
+// der Aufbau zweistufig ist: erst die Blöcke herausschneiden, dann der Rest.
+function htmlToQuotedText(html) {
+  const marked = String(html).replace(/<blockquote[^>]*>([\s\S]*?)<\/blockquote>/gi, (_, inner) => {
+    const body = htmlToText(inner);
+    return '\n' + body.split('\n').map(line => '> ' + line).join('\n') + '\n';
+  });
+  return htmlToText(marked);
 }
 
 // Verify SMTP credentials without sending.
@@ -283,6 +351,15 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
   const from = fromHeader(account);
   const replyTo = draft.reply_to || account.reply_to || undefined;
   const attempt = onlyFailed ? 'resend' : 'send';
+  // Gesprächsfaden: liegt am Entwurf, seit er als Antwort angelegt wurde.
+  // Ohne diese beiden Kopfzeilen ist die Mail beim Empfänger eine neue Mail
+  // mit „Re:" im Betreff und hängt nicht unter der Frage.
+  const inReplyTo = draft.in_reply_to || undefined;
+  const references = draft.refs || undefined;
+  // Nur für Antworten die fertige Quelle aufheben: sie wandert anschließend
+  // als Kopie in den Ordner „Gesendet".
+  const isReply = !!draft.reply_message_id;
+  const toText = isReply ? htmlToQuotedText : htmlToText;
   const { html: composed, attachments: assetAtts } = inlineAssets(composeDraftHtml(draft));
   const fileAtts = attachmentsForSend(draftId);
   const allAtts = [...fileAtts, ...assetAtts];
@@ -291,6 +368,7 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
   const draftVars = draftVarsOf(draft);
   const base = { ...defaults, ...draftVars }; // für single-mode (ohne Empfängerkontext)
   let sent = 0, failed = 0;
+  let reply = null;   // { answered, copied } – nur bei Antworten gefüllt
 
   const logEv = (r, status, extra = {}) => logSendEvent({
     draft_id: draftId, draft_subject: draft.subject, account_email: account.from_email,
@@ -309,21 +387,23 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
       // zitiert die Originalmail komplett zurück, die Zuordnung läuft dann
       // über Referenz + Final-Recipient-Adresse (siehe imap.js noteBounce).
       const relayRefs = all.map(r => ensureRelayRef(r.id)).filter(Boolean);
-      const info = await transport.sendMail({
+      const info = await deliver(transport, {
         from, replyTo, attachments: attach,
         to: to.map(addr),
         cc: cc.length ? cc.map(addr) : undefined,
         bcc: bcc.length ? bcc.map(addr) : undefined,
         subject: personalize(draft.subject, base),
         html: withPixel(wrapEmailHtml(personalize(composed, base)), singleToken),
-        text: personalize(draft.text || htmlToText(composed), base),
+        text: personalize(draft.text || toText(composed), base),
+        inReplyTo, references,
         headers: {
           'X-Relay-Draft': String(draftId),
           ...(relayRefs.length ? { 'X-Relay-Ref': relayRefs.join(', ') } : {}),
         },
-      });
+      }, isReply);
       for (const r of all) { setRecipientResult(r.id, 'sent', { messageId: info.messageId }); logEv(r, 'sent', { message_id: info.messageId }); }
       sent = to.length; onProgress({ index: 0, total, email: 'alle', status: 'sent' });
+      if (isReply) reply = await archiveReply(account, draft, info.raw);
     } catch (e) {
       for (const r of all) { setRecipientResult(r.id, 'failed', { error: e.message }); logEv(r, 'failed', { error: e.message }); }
       failed = to.length; onProgress({ index: 0, total, email: 'alle', status: 'failed', error: e.message });
@@ -339,14 +419,15 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
         // WER geöffnet hat, statt nur DASS jemand geöffnet hat.
         const token = tracked ? newTrackingToken() : null;
         if (token) setRecipientToken(r.id, token);
-        const info = await transport.sendMail({
+        const info = await deliver(transport, {
           from, replyTo, attachments: attach,
           to: addr(r),
           cc: cc.length ? cc.map(addr) : undefined,
           bcc: bcc.length ? bcc.map(addr) : undefined,
           subject: personalize(draft.subject, vars),
           html: withPixel(wrapEmailHtml(personalize(composed, vars)), token),
-          text: personalize(draft.text || htmlToText(composed), vars),
+          text: personalize(draft.text || toText(composed), vars),
+          inReplyTo, references,
           // Hilft der Bounce-Zuordnung: die Meldung zitiert die Kopfzeilen zurück.
           // X-Relay-Ref ist der eigentliche Beleg (unerratbar, kontogebunden);
           // X-Relay-Recipient bleibt nur zur Lesbarkeit im Bericht.
@@ -355,9 +436,11 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
             'X-Relay-Recipient': String(r.id),
             'X-Relay-Ref': ensureRelayRef(r.id),
           },
-        });
+        }, isReply && i === 0);
         setRecipientResult(r.id, 'sent', { messageId: info.messageId }); logEv(r, 'sent', { message_id: info.messageId });
         sent++; onProgress({ index: i, total, email: r.email, status: 'sent' });
+        // Eine Antwort hat einen Empfänger; abgelegt wird die erste Mail.
+        if (isReply && i === 0) reply = await archiveReply(account, draft, info.raw);
       } catch (e) {
         setRecipientResult(r.id, 'failed', { error: e.message }); logEv(r, 'failed', { error: e.message });
         failed++; onProgress({ index: i, total, email: r.email, status: 'failed', error: e.message });
@@ -371,5 +454,5 @@ export async function sendDraft(draftId, onProgress = () => {}, opts = {}) {
   const totalSent = allTo.filter(r => r.status === 'sent').length;
   const status = totalFailed === 0 ? 'sent' : totalSent === 0 ? 'failed' : 'partial';
   setDraftStatus(draftId, status, totalFailed ? `${totalFailed} Empfänger fehlgeschlagen` : null);
-  return { status, sent, failed, totalSent, totalFailed };
+  return { status, sent, failed, totalSent, totalFailed, ...(reply ? { reply } : {}) };
 }

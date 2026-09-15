@@ -14,7 +14,6 @@ interface Mailbox { path: string; name: string; delimiter: string; specialUse: s
 interface FolderStat { folder: string; count: number; unread: number }
 
 const fromLabel = (m: Message) => m.from_name || m.from_email || '(unbekannt)';
-const escapeHtml = (s: string) => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]!));
 function folderLabel(path: string, specialUse?: string | null) {
   const names: Record<string, string> = { '\\Inbox': 'Posteingang', '\\Sent': 'Gesendet', '\\Drafts': 'Entwürfe', '\\Archive': 'Archiv', '\\Junk': 'Spam', '\\Trash': 'Papierkorb', '\\Flagged': 'Markiert', '\\All': 'Alle Nachrichten' };
   if (specialUse && names[specialUse]) return names[specialUse];
@@ -122,12 +121,18 @@ export function Inbox() {
     await api('/messages/' + id, { method: 'DELETE' }); setMessages(ms => ms.filter(m => m.id !== id)); setOpenId(null); setDetail(null);
   }
   async function addSenderToContacts(m: Message) { if (m.from_email) { await api('/contacts', { method: 'POST', body: { email: m.from_email, name: m.from_name || '' } }); toast(`${m.from_email} ins Adressbuch übernommen`); } }
-  async function reply(m: Message) {
+  // Den Entwurf baut der Server: nur er kennt Reply-To, Cc und die
+  // References-Kette – ohne die wäre die Antwort beim Empfänger eine neue Mail
+  // neben der Frage statt einer Antwort darunter.
+  async function reply(m: Message, replyAll = false) {
     if (!m.from_email) return;
-    const quoted = m.text ? `<blockquote style="margin:12px 0;padding:8px 14px;border-left:2px solid #ccc;color:#555;white-space:pre-wrap">${escapeHtml(m.text.slice(0, 4000))}</blockquote>` : m.snippet ? `<blockquote>${escapeHtml(m.snippet)}</blockquote>` : '';
-    const subject = /^re:/i.test(m.subject || '') ? m.subject || '' : 'Re: ' + (m.subject || '');
-    const d = await api<Draft>('/drafts', { method: 'POST', body: { account_id: m.account_id, subject, html: `<p>Hallo {{name}},</p>\n<p>…</p>\n<hr>\n<p>Am ${fullDateTime(m.date)} schrieb ${escapeHtml(fromLabel(m))}:</p>${quoted}`, recipients: [{ email: m.from_email, name: m.from_name || null, kind: 'to' }] } });
-    toast('Antwort-Entwurf erstellt'); nav(ROUTES.email.draft(d.id));
+    try {
+      const r = await api<{ draft: Draft; cc: { email: string }[]; threaded: boolean }>('/messages/' + m.id + '/reply', { method: 'POST', body: { reply_all: replyAll } });
+      toast(r.threaded
+        ? (replyAll && r.cc.length ? `Antwort-Entwurf erstellt · ${r.cc.length} auf Cc` : 'Antwort-Entwurf erstellt')
+        : 'Antwort-Entwurf erstellt – die Originalmail hat keine Message-ID, der Gesprächsfaden bleibt offen');
+      nav(ROUTES.email.draft(r.draft.id));
+    } catch (e) { toast((e as Error).message, 'err'); }
   }
 
   if (!loading && accounts.length === 0) return <div className="empty"><Icon name="inbox" size={28} />Kein Account mit IMAP konfiguriert. Hinterlege unter <strong>Accounts</strong> die IMAP-Zugangsdaten.</div>;
@@ -152,7 +157,7 @@ export function Inbox() {
         </div>
       </section>
       <section className="reading-pane">
-        {!openId ? <div className="reading-empty"><Icon name="mailOpen" size={32} /><strong>Nachricht auswählen</strong><span>Die E-Mail erscheint hier, ohne die Liste zu verlassen.</span></div> : !detail ? <div className="reading-loading"><div className="skel" /></div> : <><div className="reading-header"><div className="reading-actions"><button className="btn sm" onClick={() => reply(detail)}><Icon name="reply" size={14} />Antworten</button><button className="btn ghost sm icon-only" title="Absender ins Adressbuch" onClick={() => addSenderToContacts(detail)}><Icon name="userPlus" size={14} /></button><button className="btn ghost sm icon-only" title={detail.seen ? 'Als ungelesen markieren' : 'Als gelesen markieren'} onClick={() => { toggleSeen(detail); setDetail(d => d ? { ...d, seen: d.seen ? 0 : 1 } : d); }}><Icon name={detail.seen ? 'mail' : 'mailOpen'} size={14} /></button><button className={'btn ghost sm icon-only' + (externalImages ? ' active' : '')} title={externalImages ? 'Externe Bilder werden geladen – klicken zum Blockieren' : 'Externe Bilder laden (nur für diese Nachricht)'} aria-pressed={externalImages} onClick={() => setExternalImages(v => !v)}><Icon name="image" size={14} /></button><button className="btn danger sm icon-only" title="Lokal löschen" onClick={() => del(detail.id)}><Icon name="trash" size={14} /></button></div><h2>{detail.subject || '(kein Betreff)'}</h2><div className="sender-line"><span className="account-avatar">{fromLabel(detail)[0].toUpperCase()}</span><span><strong>{fromLabel(detail)}</strong><small>{detail.from_email}</small></span><time title={fullDateTime(detail.date)}>{relTime(detail.date)}</time></div><details><summary>Empfangsdetails</summary><div><strong>An:</strong> {detail.to_text || '—'}<br/><strong>Postfach:</strong> {accountMap.get(detail.account_id)?.name || '—'}<br/><strong>Ordner:</strong> {folderLabel(detail.folder)}<br/><strong>Datum:</strong> {fullDateTime(detail.date)}</div></details></div><iframe className="reading-frame" title="Mail" sandbox="" src={'/api/messages/' + detail.id + '/body.html' + (externalImages ? '?external=1' : '')} /></>}
+        {!openId ? <div className="reading-empty"><Icon name="mailOpen" size={32} /><strong>Nachricht auswählen</strong><span>Die E-Mail erscheint hier, ohne die Liste zu verlassen.</span></div> : !detail ? <div className="reading-loading"><div className="skel" /></div> : <><div className="reading-header"><div className="reading-actions"><button className="btn sm" onClick={() => reply(detail)}><Icon name="reply" size={14} />{detail.answered ? 'Erneut antworten' : 'Antworten'}</button><button className="btn ghost sm" title="Absender und alle übrigen Empfänger auf Cc" onClick={() => reply(detail, true)}><Icon name="users" size={14} />Allen antworten</button><button className="btn ghost sm icon-only" title="Absender ins Adressbuch" onClick={() => addSenderToContacts(detail)}><Icon name="userPlus" size={14} /></button><button className="btn ghost sm icon-only" title={detail.seen ? 'Als ungelesen markieren' : 'Als gelesen markieren'} onClick={() => { toggleSeen(detail); setDetail(d => d ? { ...d, seen: d.seen ? 0 : 1 } : d); }}><Icon name={detail.seen ? 'mail' : 'mailOpen'} size={14} /></button><button className={'btn ghost sm icon-only' + (externalImages ? ' active' : '')} title={externalImages ? 'Externe Bilder werden geladen – klicken zum Blockieren' : 'Externe Bilder laden (nur für diese Nachricht)'} aria-pressed={externalImages} onClick={() => setExternalImages(v => !v)}><Icon name="image" size={14} /></button><button className="btn danger sm icon-only" title="Lokal löschen" onClick={() => del(detail.id)}><Icon name="trash" size={14} /></button></div><h2>{detail.subject || '(kein Betreff)'}</h2><div className="sender-line"><span className="account-avatar">{fromLabel(detail)[0].toUpperCase()}</span><span><strong>{fromLabel(detail)}</strong><small>{detail.from_email}</small></span><time title={fullDateTime(detail.date)}>{relTime(detail.date)}</time></div><details><summary>Empfangsdetails</summary><div><strong>An:</strong> {detail.to_text || '—'}<br/><strong>Postfach:</strong> {accountMap.get(detail.account_id)?.name || '—'}<br/><strong>Ordner:</strong> {folderLabel(detail.folder)}<br/><strong>Datum:</strong> {fullDateTime(detail.date)}</div></details></div><iframe className="reading-frame" title="Mail" sandbox="" src={'/api/messages/' + detail.id + '/body.html' + (externalImages ? '?external=1' : '')} /></>}
       </section>
     </div>
   </div>;
