@@ -1,22 +1,25 @@
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/tsconfig.tsbuildinfo
 data/
 *.log
 .DS_Store
-data_server.log
 
-# Echte SMTP-Zugangsdaten – niemals committen. Vorlage: backend/accounts.seed.example.json
+# Echte SMTP-Zugangsdaten, niemals committen. Vorlage: backend/accounts.seed.example.json
 accounts.seed.json
 backend/accounts.seed.json
+
+# Lokale Umgebung. Die Vorlagen .env.example und .env.coolify.example gehören ins Repo.
 .env
-*.env.local
 *.env
 *.env.*
-# Swift-Build-Artefakte
-swift/.build/
-# Die Vorlage selbst soll ins Repo (README verweist darauf)
 !.env.example
 !.env.coolify.example
+
+# Swift-Build-Artefakte
+swift/.build/
+
+# Werkzeug-Ablagen
 .playwright-mcp/
-frontend/tsconfig.tsbuildinfo
+.code-review-graph/
