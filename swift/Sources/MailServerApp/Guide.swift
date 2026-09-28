@@ -6,7 +6,7 @@ struct GuideView: View {
     @State private var info: ServerInfo?
 
     private var node: String { info?.node ?? "node" }
-    private var mcp: String { info?.mcpServerPath ?? "/PFAD/zu/mail_server/src/mcp-server.js" }
+    private var mcp: String { info?.mcpServerPath ?? "/PFAD/zu/mail_server/backend/src/mcp-server.js" }
     private var root: String { info?.projectRoot ?? "/PFAD/zu/mail_server" }
 
     private var claudeCode: String { "claude mcp add mail-server -- \"\(node)\" \"\(mcp)\"" }

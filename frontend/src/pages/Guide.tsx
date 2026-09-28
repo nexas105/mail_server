@@ -117,7 +117,7 @@ export function Guide() {
     : grouped;
 
   const node = info?.node || 'node';
-  const mcp = info?.mcpServerPath || '/PFAD/zu/mail_server/src/mcp-server.js';
+  const mcp = info?.mcpServerPath || '/PFAD/zu/mail_server/backend/src/mcp-server.js';
   const root = info?.projectRoot || '/PFAD/zu/mail_server';
   const toolCount = tools ? tools.length : GROUPS.reduce((n, g) => n + g.names.length, 0);
 
