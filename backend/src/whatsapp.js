@@ -10,7 +10,9 @@
  * └──────────────────────────────────────────────────────────────────────────┘
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import makeWASocket, {
   useMultiFileAuthState, makeCacheableSignalKeyStore, fetchLatestBaileysVersion,
   DisconnectReason, Browsers, downloadMediaMessage, jidNormalizedUser, isJidGroup,
@@ -1182,6 +1184,204 @@ export async function sendSticker(id, jid, base64, { origin = 'ui' } = {}) {
     const { _msg, ...clean } = row;
     db.insertWaMessages([clean]);
     const stored = db.getWaMessageByWaId(id, clean.chat_jid, clean.wa_id);
+    emit('message', { ...db.getWaChat(clean.chat_id), message: stored });
+    return stored;
+  };
+  session.sendQueue = session.sendQueue.then(run, run);
+  return session.sendQueue;
+}
+
+/* ------------------------------------------------------- Medien senden */
+
+/**
+ * Obergrenzen je Art. WhatsApp selbst nimmt teils mehr (Dokumente bis 2 GB),
+ * aber alles läuft hier als base64 durch JSON und liegt einmal komplett im
+ * Speicher – und große Uploads über eine Nummer, die per Web-Client hängt,
+ * sind ohnehin eher auffällig.
+ */
+const MEDIA_LIMITS = {
+  image: 16 * 1024 * 1024,
+  audio: 16 * 1024 * 1024,
+  voice: 16 * 1024 * 1024,
+  video: 64 * 1024 * 1024,
+  document: 100 * 1024 * 1024,
+};
+export const MEDIA_KINDS = Object.keys(MEDIA_LIMITS);
+
+// Nur diese Formate zeigt WhatsApp inline an; alles andere (GIF, SVG, HEIC,
+// MKV …) kommt beim Empfänger kaputt oder gar nicht an und geht darum als Datei.
+const INLINE_IMAGE = /^image\/(jpeg|png|webp)$/;
+const INLINE_VIDEO = /^video\/(mp4|3gpp)$/;
+
+/** Art aus dem MIME-Typ ableiten, wenn der Aufrufer keine angibt. */
+export function kindForMime(mime) {
+  const m = String(mime || '').toLowerCase().split(';')[0].trim();
+  if (INLINE_IMAGE.test(m)) return 'image';
+  if (INLINE_VIDEO.test(m)) return 'video';
+  if (m.startsWith('audio/')) return 'audio';
+  return 'document';
+}
+
+const fmtMb = n => `${(n / 1048576).toFixed(1)} MB`;
+
+/** Lauf eines Hilfsprogramms; liefert stdout/stderr, wirft bei Exit-Code ≠ 0. */
+function runTool(cmd, args, { timeoutMs = 60_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try { child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] }); }
+    catch (e) { return reject(e); }
+    const out = [], err = [];
+    child.stdout.on('data', d => out.push(d));
+    child.stderr.on('data', d => err.push(d));
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.on('error', e => {
+      clearTimeout(timer);
+      reject(e.code === 'ENOENT'
+        ? new Error(`${cmd} ist nicht installiert – für Sprachnachrichten wird ffmpeg gebraucht (im Docker-Image enthalten)`)
+        : e);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      const stderr = Buffer.concat(err).toString();
+      if (code === 0) return resolve({ stdout: Buffer.concat(out).toString(), stderr });
+      const tail = stderr.trim().split('\n').slice(-3).join(' | ').slice(0, 400);
+      reject(new Error(`${cmd} fehlgeschlagen (${signal || `Exit ${code}`}): ${tail}`));
+    });
+  });
+}
+
+/**
+ * Beliebiges Audio → WhatsApp-Sprachnachricht: Opus im Ogg-Container, mono,
+ * 48 kHz. Nur so zeigt WhatsApp die Wellenform-Blase mit Abspielknopf statt
+ * eines Datei-Anhangs; ein MP3 oder WAV mit ptt=true kommt beim Empfänger als
+ * „Audio nicht verfügbar" an.
+ *
+ * Über Temp-Dateien statt Pipes: ffmpeg muss für Ogg die Dauer am Ende in den
+ * Container schreiben, und WAV über stdin kennt seine Länge nicht sicher.
+ * Liefert { buffer, seconds }.
+ */
+export async function toVoiceNote(input) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-voice-'));
+  const src = path.join(dir, 'in');
+  const dst = path.join(dir, 'out.ogg');
+  try {
+    fs.writeFileSync(src, input);
+    const { stderr } = await runTool('ffmpeg', [
+      '-hide_banner', '-nostdin', '-y', '-i', src,
+      '-vn', '-ac', '1', '-ar', '48000', '-c:a', 'libopus', '-b:a', '32k', '-application', 'voip',
+      '-f', 'ogg', dst,
+    ], { timeoutMs: 120_000 });
+    const buffer = fs.readFileSync(dst);
+    if (!buffer.length) throw new Error('ffmpeg hat keine Audiodaten erzeugt');
+
+    // Dauer: ffprobe auf das Ergebnis ist exakt; fällt es aus, tut es die
+    // letzte Fortschrittszeile von ffmpeg („time=00:00:03.48") auch.
+    let seconds = null;
+    try {
+      const { stdout } = await runTool('ffprobe', [
+        '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', dst,
+      ], { timeoutMs: 20_000 });
+      seconds = parseFloat(stdout);
+    } catch { /* Ausweichweg unten */ }
+    if (!Number.isFinite(seconds)) {
+      const times = [...stderr.matchAll(/time=(\d+):(\d+):(\d+(?:\.\d+)?)/g)];
+      const t = times.at(-1);
+      seconds = t ? (+t[1]) * 3600 + (+t[2]) * 60 + parseFloat(t[3]) : null;
+    }
+    return { buffer, seconds: Number.isFinite(seconds) ? Math.max(1, Math.round(seconds)) : undefined };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Prüft, ob gerade gesendet werden darf: verbunden und unter dem Stundenlimit.
+ * Eigene Funktion, damit teure Vorarbeit (Sprachsynthese auf der GPU) gar
+ * nicht erst anläuft, wenn der Versand danach ohnehin scheitern würde.
+ */
+export function assertReadyToSend(id) {
+  const session = assertConnected(id);
+  const account = db.getWaAccount(id);
+  const sent = db.waSentLastHour(id);
+  if (sent >= (account.send_per_hour || 30)) {
+    throw new Error(`Stundenlimit erreicht (${sent}/${account.send_per_hour}) – Schutz vor Nummernsperre`);
+  }
+  return session;
+}
+
+/**
+ * Bild, Video, Datei, Audio oder Sprachnachricht senden.
+ *
+ * Dieselbe Warteschlange, dasselbe Stundenlimit und dieselbe Ablage wie
+ * sendText. Die gesendete Datei landet zusätzlich in MEDIA_DIR wie eine
+ * empfangene – sonst müsste die Oberfläche sie für die Anzeige erst wieder
+ * bei WhatsApp herunterladen, und das klappt bei eigenen Nachrichten nur,
+ * solange die Upload-URL noch gilt.
+ *
+ * kind: image | video | document | audio | voice. voice wird mit ffmpeg zu
+ * Ogg/Opus umgewandelt und als Sprachnachricht (ptt) verschickt.
+ * transcript: bei vorgelesenem Text der Wortlaut – steht dann gleich als
+ * Transkript an der Nachricht, statt ihn per Whisper zurückzuraten.
+ */
+export async function sendMedia(id, jid, { buffer, mime, filename, caption, kind } = {}, { origin = 'ui', transcript = null } = {}) {
+  const session = assertReadyToSend(id);
+  if (!Buffer.isBuffer(buffer) || !buffer.length) throw new Error('Leere Datei');
+  mime = String(mime || '').trim() || 'application/octet-stream';
+  kind = kind || kindForMime(mime);
+  if (!MEDIA_LIMITS[kind]) throw new Error(`Unbekannte Medienart "${kind}" – erlaubt: ${MEDIA_KINDS.join(', ')}`);
+  caption = caption ? String(caption) : undefined;
+
+  let content, seconds;
+  if (kind === 'voice') {
+    // Die Grenze gilt für das, was WhatsApp bekommt – das Ogg ist viel kleiner
+    // als etwa ein WAV vom TTS-Dienst. Die Eingabe trotzdem deckeln, damit
+    // niemand ffmpeg mit einem Gigabyte beschäftigt.
+    if (buffer.length > MEDIA_LIMITS.document) throw new Error(`Audio ist ${fmtMb(buffer.length)} groß – höchstens ${fmtMb(MEDIA_LIMITS.document)} zum Umwandeln`);
+    const voice = await toVoiceNote(buffer);
+    if (voice.buffer.length > MEDIA_LIMITS.voice) {
+      throw new Error(`Sprachnachricht ist umgewandelt ${fmtMb(voice.buffer.length)} groß – erlaubt sind ${fmtMb(MEDIA_LIMITS.voice)}`);
+    }
+    buffer = voice.buffer; seconds = voice.seconds;
+    mime = 'audio/ogg; codecs=opus';
+    filename = 'sprachnachricht.ogg';
+    content = { audio: buffer, mimetype: mime, ptt: true, ...(seconds ? { seconds } : {}) };
+  } else {
+    if (buffer.length > MEDIA_LIMITS[kind]) {
+      const label = { image: 'Bild', video: 'Video', audio: 'Audio', document: 'Datei' }[kind];
+      throw new Error(`${label} ist ${fmtMb(buffer.length)} groß – WhatsApp-Versand hier höchstens ${fmtMb(MEDIA_LIMITS[kind])}`);
+    }
+    if (kind === 'image') content = { image: buffer, caption, mimetype: mime };
+    else if (kind === 'video') content = { video: buffer, caption, mimetype: mime };
+    else if (kind === 'audio') content = { audio: buffer, mimetype: mime };
+    else {
+      filename = String(filename || '').trim() || 'datei';
+      content = { document: buffer, mimetype: mime, fileName: filename, caption };
+    }
+  }
+
+  const run = async () => {
+    // Medien brauchen auch beim Menschen länger als Text – etwas mehr Pause.
+    await sleep(1000 + Math.random() * 1200);
+    const res = await session.sock.sendMessage(jid, content);
+    const row = toRow(session, res, { origin });
+    if (!row) return null;
+    const { _msg, ...clean } = row;
+    // describeMessage liest den Dateinamen nur bei Dokumenten aus der Nachricht;
+    // für die Ablage und die Anzeige soll er immer dastehen, wenn wir ihn kennen.
+    if (!clean.media_filename && filename) clean.media_filename = filename;
+    db.insertWaMessages([clean]);
+    let stored = db.getWaMessageByWaId(id, clean.chat_jid, clean.wa_id);
+    if (stored) {
+      try {
+        fs.mkdirSync(MEDIA_DIR, { recursive: true, mode: 0o700 });
+        const safe = String(stored.media_filename || stored.type || 'datei').replace(/[^\w.\-]+/g, '_').slice(0, 100);
+        const file = path.join(MEDIA_DIR, `${stored.id}_${safe}`);
+        fs.writeFileSync(file, buffer);
+        stored = db.setWaMessageMedia(stored.id, { stored_path: file, media_size: buffer.length });
+      } catch (e) { log('Gesendetes Medium nicht abgelegt:', e.message); }
+      if (kind === 'voice' && transcript) stored = db.setWaTranscript(stored.id, { status: 'done', text: transcript }) || stored;
+      else if (stored.type === 'audio') enqueueTranscription(stored.id);
+    }
     emit('message', { ...db.getWaChat(clean.chat_id), message: stored });
     return stored;
   };

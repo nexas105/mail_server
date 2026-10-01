@@ -1073,6 +1073,90 @@ tool(
   },
 );
 
+// Medien: die Datei muss als Inhalt mitkommen (base64), als Adresse (url, lädt
+// der Web-Server selbst) oder per path – letzteres nur, wo die Richtlinie
+// Dateizugriff erlaubt (stdio auf demselben Rechner oder MCP_FILES_DIR), genau
+// wie bei Mail-Anhängen. Über HTTP sieht dieser Server den Rechner des Clients nicht.
+const WA_MEDIA_MAX_BYTES = 100 * 1024 * 1024;
+const WA_MIME_EXTRA = {
+  '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.m4a': 'audio/mp4', '.wav': 'audio/wav', '.aac': 'audio/aac',
+  '.mov': 'video/quicktime', '.webm': 'video/webm', '.3gp': 'video/3gpp',
+};
+const waMimeForName = name => WA_MIME_EXTRA[path.extname(name || '').toLowerCase()] || mimeForName(name || '');
+
+tool(
+  'send_wa_media',
+  'SENDET SOFORT ein Bild, Video, eine Datei oder Audio per WhatsApp an einen echten Menschen. Keine '
+  + 'Vorschau, kein Zurück, keine Rückfrage beim Nutzer. Nur benutzen, wenn Empfänger, Datei UND '
+  + 'Bildunterschrift ausdrücklich bestätigt sind. Die Datei kommt als base64 (mit filename), als url '
+  + '(der Server lädt sie selbst, nur öffentliche https-Adressen) oder als path – path geht nur, wenn '
+  + 'dieser Server auf demselben Rechner läuft bzw. MCP_FILES_DIR freigegeben ist. Grenzen: Bild/Audio '
+  + '16 MB, Video 64 MB, Datei 100 MB; base64 über MCP-HTTP zusätzlich durch MCP_MAX_BODY (30 MB) begrenzt. '
+  + 'Videos sollten MP4 (H.264) sein, sonst lieber als Datei (kind=document).',
+  {
+    chat_id: z.number().int().describe('Aus list_wa_chats'),
+    base64: z.string().optional().describe('Dateiinhalt base64-kodiert (dann filename angeben)'),
+    url: z.string().optional().describe('Alternative: öffentliche https-Adresse, die der Server herunterlädt'),
+    path: z.string().optional().describe('Alternative: Pfad auf dem Rechner DIESES Servers (nur lokal oder in MCP_FILES_DIR)'),
+    filename: z.string().optional().describe('Dateiname beim Empfänger (wichtig bei Dokumenten)'),
+    mime: z.string().optional().describe('Standard: aus filename abgeleitet bzw. vom Download'),
+    caption: z.string().optional().describe('Bildunterschrift (Bild, Video, Dokument)'),
+    kind: z.enum(['image', 'video', 'document', 'audio', 'voice']).optional()
+      .describe('Standard: aus dem MIME-Typ (JPEG/PNG/WebP → image, MP4 → video, audio/* → audio, sonst document). '
+        + 'voice = als Sprachnachricht umwandeln'),
+  },
+  async ({ chat_id, base64, url, path: filePath, filename, mime, caption, kind }) => {
+    try {
+      const body = { filename, mime, caption, kind };
+      if (base64) {
+        body.base64 = base64;
+      } else if (filePath) {
+        const file = resolveAttachmentPath(filePath);
+        if (!fs.existsSync(file)) throw new Error(`Datei nicht gefunden: ${shownPath(file)}`);
+        const stat = fs.statSync(file);
+        if (!stat.isFile()) throw new Error(`Keine reguläre Datei: ${shownPath(file)}`);
+        if (stat.size > WA_MEDIA_MAX_BYTES) throw new Error(`Zu groß (${(stat.size / 1048576).toFixed(1)} MB, max. 100 MB): ${shownPath(file)}`);
+        body.base64 = fs.readFileSync(file).toString('base64');
+        body.filename = filename || path.basename(file);
+      } else if (url) {
+        body.url = url;
+      } else {
+        return ok({ error: 'base64, url oder path angeben' });
+      }
+      if (!body.mime && body.filename) body.mime = waMimeForName(body.filename);
+      const r = await ui(`/api/whatsapp/chats/${chat_id}/media`, { method: 'POST', body, timeoutMs: 5 * 60_000 });
+      return ok({ ...r, open_in_ui: `${LINK}/whatsapp` });
+    } catch (e) {
+      return ok({ error: e.message, open_in_ui: `${LINK}/whatsapp` });
+    }
+  },
+);
+
+tool(
+  'send_wa_voice',
+  'SENDET SOFORT eine WhatsApp-Sprachnachricht: der Text wird mit der GEKLONTEN STIMME des Nutzers '
+  + 'vorgelesen – der Empfänger hört also den Nutzer selbst sprechen. Keine Vorschau, kein Zurück. Nur '
+  + 'benutzen, wenn Empfänger UND exakter Wortlaut ausdrücklich bestätigt sind, und nie, um sich als '
+  + 'der Nutzer auszugeben, wo er das nicht will. Höchstens 1500 Zeichen; die Erzeugung dauert je nach '
+  + 'Länge und GPU zwischen Sekunden und gut zwei Minuten. Der Text steht danach als Transkript an der Nachricht.',
+  {
+    chat_id: z.number().int().describe('Aus list_wa_chats'),
+    text: z.string().describe('Wortlaut, der vorgelesen wird – so schreiben, wie man spricht'),
+    profile_id: z.string().optional().describe('Anderes Stimmprofil als VOICE_PROFILE_ID'),
+    language: z.string().optional().describe('Sprachcode, Standard de'),
+  },
+  async ({ chat_id, text, profile_id, language }) => {
+    try {
+      const r = await ui(`/api/whatsapp/chats/${chat_id}/voice`, {
+        method: 'POST', body: { text, profile_id, language }, timeoutMs: 5 * 60_000,
+      });
+      return ok({ ...r, open_in_ui: `${LINK}/whatsapp` });
+    } catch (e) {
+      return ok({ error: e.message, open_in_ui: `${LINK}/whatsapp` });
+    }
+  },
+);
+
 const schedView = r => ({
   scheduled_id: r.id, chat_id: r.chat_id, chat: r.chat_name || r.chat_jid,
   send_at: new Date(r.send_at * 1000).toISOString(), status: r.status,

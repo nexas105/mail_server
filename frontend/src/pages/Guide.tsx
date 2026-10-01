@@ -86,7 +86,7 @@ const GROUPS: { title: string; icon: IconName; note: string; names: string[] }[]
     title: 'WhatsApp', icon: 'chat',
     note: 'Lesen geht immer; senden nur mit doppelter Freigabe — siehe „Was die KI darf".',
     names: ['list_wa_accounts', 'list_wa_chats', 'get_wa_chat', 'list_wa_messages', 'get_wa_message',
-      'search_wa_messages', 'list_wa_contacts', 'send_wa_message', 'mark_wa_chat_read',
+      'search_wa_messages', 'list_wa_contacts', 'send_wa_message', 'send_wa_media', 'send_wa_voice', 'mark_wa_chat_read',
       'sync_wa_history', 'link_wa_contact'],
   },
 ];

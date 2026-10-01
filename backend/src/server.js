@@ -28,6 +28,8 @@ import { subscribe, ping as waPing, closeAllStreams, emit as waEmit } from './wa
 import { ROOT_DIR, STATIC_DIR, DATA_DIR } from './paths.js';
 import * as backup from './backup.js';
 import { transcriberStatus } from './transcribe.js';
+import { synthesize, ttsEnabled, TTS_MAX_CHARS } from './tts.js';
+import { assertSafeTarget } from './net-guard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -97,7 +99,13 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '30mb' }));
+// WhatsApp-Medien (Videos, Dokumente als base64) sind größer als 30 MB. Diese
+// Routen bringen ihren eigenen Parser mit (mediaJson unten) – der greift erst
+// NACH der Anmeldeprüfung, so kann niemand ohne Ausweis 140 MB JSON parsen lassen.
+// Ein Routen-Parser allein hilft nicht: hat dieser hier schon abgelehnt, ist es zu spät.
+const MEDIA_UPLOAD_ROUTE = /^\/api\/whatsapp\/chats\/\d+\/(media|voice)$/;
+const defaultJson = express.json({ limit: '30mb' });
+app.use((req, res, next) => (MEDIA_UPLOAD_ROUTE.test(req.path) ? next() : defaultJson(req, res, next)));
 
 // Anmeldung, Sitzungen, /api/auth/* und der Schutzwall vor allen weiteren
 // /api-Routen. Muss VOR den Routen stehen, die geschützt werden sollen.
@@ -1120,6 +1128,109 @@ app.post('/api/whatsapp/chats/:id/sticker', bigJson, wrap(async (req, res) => {
   const msg = await wa.sendSticker(chat.wa_account_id, chat.jid, req.body.webp, { origin });
   res.json({ sent: true, wa_id: msg?.wa_id, chat_id: chat.id });
 }));
+
+// ---- Medien und Sprachnachrichten -----------------------------------------
+// Größter Fall: Dokument mit 100 MB → rund 134 MB base64. Eigener Parser, siehe
+// MEDIA_UPLOAD_ROUTE oben. Die Obergrenzen je Art prüft whatsapp.js.
+const mediaJson = express.json({ limit: '140mb' });
+const MEDIA_URL_MAX = 100 * 1024 * 1024;
+
+/**
+ * Datei von einer URL holen (für Aufrufer, die die Datei selbst nicht haben –
+ * etwa der MCP-Server, der nicht auf den Rechner des Clients schauen kann).
+ *
+ * Nicht guardedFetch: das lässt nur Weiterleitungen auf derselben Origin zu,
+ * weil dort Zugangsdaten mitgehen. Hier geht nichts mit, und Download-Links
+ * leiten fast immer auf ein CDN um. Jeder Hop läuft trotzdem durch
+ * assertSafeTarget – sonst wäre das ein bequemer Weg, interne Dienste
+ * (Metadaten, localhost) abzufragen und das Ergebnis per WhatsApp zu bekommen.
+ */
+async function fetchMediaUrl(url) {
+  let current = String(url);
+  for (let hop = 0; hop <= 3; hop++) {
+    await assertSafeTarget(current, { purpose: 'Medien' });
+    const r = await fetch(current, { redirect: 'manual', signal: AbortSignal.timeout(60_000) });
+    const loc = r.headers.get('location');
+    if ([301, 302, 303, 307, 308].includes(r.status) && loc) {
+      try { await r.body?.cancel(); } catch { /* egal */ }
+      current = new URL(loc, current).toString();
+      continue;
+    }
+    if (!r.ok) throw new Error(`Download fehlgeschlagen (HTTP ${r.status}): ${current}`);
+    const len = Number(r.headers.get('content-length')) || 0;
+    if (len > MEDIA_URL_MAX) throw new Error(`Datei ist ${(len / 1048576).toFixed(1)} MB groß – höchstens 100 MB`);
+    // Ohne (ehrliche) Längenangabe mitzählen und rechtzeitig abbrechen.
+    const chunks = []; let size = 0;
+    for await (const c of r.body) {
+      size += c.length;
+      if (size > MEDIA_URL_MAX) throw new Error('Datei ist größer als 100 MB – Download abgebrochen');
+      chunks.push(c);
+    }
+    let name = new URL(current).pathname.split('/').pop() || null;
+    try { if (name) name = decodeURIComponent(name); } catch { /* kaputte %-Folge: roh lassen */ }
+    return { buffer: Buffer.concat(chunks), mime: (r.headers.get('content-type') || '').split(';')[0].trim() || null, filename: name };
+  }
+  throw new Error(`Zu viele Weiterleitungen beim Download: ${url}`);
+}
+
+const decodeBase64 = b64 => Buffer.from(String(b64).replace(/^data:[^,]+,/, ''), 'base64');
+
+/** Gemeinsamer Teil beider Routen: Chat, Herkunft, Schutzregeln. */
+function mediaTarget(req) {
+  const chat = db.getWaChat(+req.params.id);
+  if (!chat) { const e = new Error('not found'); e.status = 404; throw e; }
+  const origin = req.get('x-origin') === 'mcp' ? 'mcp' : 'ui';
+  const account = db.getWaAccount(chat.wa_account_id);
+  if (!account) throw new Error('WhatsApp-Konto nicht gefunden');
+  assertMaySend(origin, account, chat);
+  return { chat, origin };
+}
+
+// Bild, Video, Datei oder Audio. Body: { base64 | url, mime, filename, caption, kind }.
+app.post('/api/whatsapp/chats/:id/media', mediaJson, wrap(async (req, res) => {
+  try {
+    const { chat, origin } = mediaTarget(req);
+    const b = req.body || {};
+    if (b.kind && !wa.MEDIA_KINDS.includes(b.kind)) throw new Error(`kind muss eines von ${wa.MEDIA_KINDS.join(', ')} sein`);
+    let file;
+    if (b.base64) file = { buffer: decodeBase64(b.base64), mime: null, filename: null };
+    else if (b.url) {
+      wa.assertReadyToSend(chat.wa_account_id);   // nicht erst 100 MB laden, um dann am Limit zu scheitern
+      file = await fetchMediaUrl(b.url);
+    } else throw new Error('base64 oder url fehlt');
+    const mime = b.mime || file.mime || 'application/octet-stream';
+    const msg = await wa.sendMedia(chat.wa_account_id, chat.jid, {
+      buffer: file.buffer, mime, filename: b.filename || file.filename, caption: b.caption, kind: b.kind,
+    }, { origin });
+    res.json({ sent: true, wa_id: msg?.wa_id, message_id: msg?.id, chat_id: chat.id, type: msg?.type, origin });
+  } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+}));
+
+// Sprachnachricht. Body: { text, profile_id?, language? } → mit geklonter Stimme
+// vorlesen; oder { base64, mime } für eine vorhandene Aufnahme.
+app.post('/api/whatsapp/chats/:id/voice', mediaJson, wrap(async (req, res) => {
+  try {
+    const { chat, origin } = mediaTarget(req);
+    const b = req.body || {};
+    // Erst prüfen, ob überhaupt gesendet werden kann – die Synthese belegt
+    // sonst bis zu drei Minuten die GPU für eine Nachricht, die nie rausgeht.
+    wa.assertReadyToSend(chat.wa_account_id);
+    let buffer, transcript = null;
+    if (b.text != null && String(b.text).trim()) {
+      transcript = String(b.text).trim();
+      buffer = await synthesize(transcript, { profileId: b.profile_id, language: b.language });
+    } else if (b.base64) {
+      buffer = decodeBase64(b.base64);
+    } else throw new Error('text oder base64 fehlt');
+    const msg = await wa.sendMedia(chat.wa_account_id, chat.jid, {
+      buffer, mime: b.mime || 'audio/wav', kind: 'voice',
+    }, { origin, transcript });
+    res.json({ sent: true, wa_id: msg?.wa_id, message_id: msg?.id, chat_id: chat.id, type: msg?.type, origin, spoken_text: transcript });
+  } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+}));
+
+// Für Oberfläche und MCP: Ist die Sprachausgabe eingerichtet?
+app.get('/api/whatsapp/voice', wrap((req, res) => res.json({ enabled: ttsEnabled(), max_chars: TTS_MAX_CHARS })));
 
 app.post('/api/whatsapp/accounts/:id/messages', wrap(async (req, res) => {
   try {

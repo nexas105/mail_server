@@ -52,6 +52,14 @@ services:
       - MAIL_TRANSCRIBE_KEY=${MAIL_TRANSCRIBE_KEY:-}
       - MAIL_TRANSCRIBE_MODEL=${MAIL_TRANSCRIBE_MODEL:-Systran/faster-whisper-small}
       - MAIL_TRANSCRIBE_LANG=${MAIL_TRANSCRIBE_LANG:-de}
+      # Text → Sprachnachricht mit geklonter Stimme (Voicebox, läuft auf eigener GPU).
+      # Leer lassen, um die Sprachausgabe abzuschalten. Nur das Backend braucht das –
+      # der MCP-Dienst schickt nur den Text hierher.
+      - VOICE_URL=${VOICE_URL:-}
+      - VOICE_USER=${VOICE_USER:-}
+      - VOICE_PASS=${VOICE_PASS:-}
+      - VOICE_PROFILE_ID=${VOICE_PROFILE_ID:-}
+      - VOICE_LANGUAGE=${VOICE_LANGUAGE:-de}
     volumes:
       - mail-data:/data
     restart: unless-stopped

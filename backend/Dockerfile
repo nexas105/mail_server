@@ -15,6 +15,10 @@ COPY --chown=node:node src ./src
 COPY --chown=node:node content.seed.json accounts.seed.example.json ./
 RUN chown node:node /app
 
+# ffmpeg wandelt Audio in WhatsApp-Sprachnachrichten (Ogg/Opus) um – sonst
+# kommen MP3/WAV beim Empfänger nicht als abspielbare Sprachblase an.
+RUN apk add --no-cache ffmpeg
+
 # Datenverzeichnis (SQLite, Keyfile, WhatsApp-Sessions) – wird als Volume gemountet.
 RUN mkdir -p /data && chown node:node /data
 

@@ -49,7 +49,7 @@ Inhalt:
 - **Batch-Versand**: pro Empfänger eine eigene, personalisierte Mail oder eine gemeinsame Mail; To / Cc / Bcc, Reply-To
 - **Live-Fortschritt** beim Senden (Server-Sent Events), Fehlgeschlagene gezielt erneut senden, Versand-Protokoll
 - **Zustellung nachverfolgen**: Bounces (RFC 3464) automatisch zuordnen, Öffnungen optional per Zählpixel
-- **WhatsApp** (Baileys): Konten per QR koppeln, Chats lesen und beantworten, Nachrichten planen, Sprachnachrichten per Whisper transkribieren
+- **WhatsApp** (Baileys): Konten per QR koppeln, Chats lesen und beantworten, Nachrichten planen, Bilder, Videos, Dateien und Sprachnachrichten senden (auch vorgelesen mit geklonter Stimme), Sprachnachrichten per Whisper transkribieren
 - **MCP-Server** mit über 100 Werkzeugen: Claude legt Entwürfe an, senden tust du in der UI (oder auf ausdrücklichen Wunsch per Tool)
 - **HTTP-API** (`/api/v1`) für Skripte und andere Systeme, mit OpenAPI-Beschreibung und Idempotency-Key
 - **Sicherung und Umzug** als ein `.tgz`, inklusive Umschlüsselung auf einen anderen Schlüssel
@@ -375,6 +375,8 @@ nicht auf.
 | `list_brands` / `apply_brand_to_draft` | Marken und Farbpaletten |
 | `list_repo_commits` / `get_repo_issue` / `read_repo_file` | Verknüpfte GitHub-Repositories lesen |
 | `send_wa_message` / `schedule_wa_message` | WhatsApp sofort senden bzw. einplanen (nur mit `MAIL_WA_MCP_SEND=1`) |
+| `send_wa_media` | Bild, Video, Datei oder Audio sofort senden (base64, url oder path; nur mit `MAIL_WA_MCP_SEND=1`) |
+| `send_wa_voice` | Text mit geklonter Stimme vorlesen und als Sprachnachricht senden (braucht `VOICE_URL`) |
 | `list_wa_scheduled` / `cancel_wa_scheduled` | Geplante WhatsApp-Nachrichten einsehen und zurückziehen |
 | `merge_wa_chats` | Doppelten Chat (@lid-Kennung) in den Nummern-Chat auflösen |
 | `transcribe_wa_message` | Sprachnachricht per Whisper in Text (läuft für neue automatisch) |
@@ -595,6 +597,25 @@ einzelne per Knopf **In Text** oder `transcribe_wa_message`. Alternativ
 `MAIL_TRANSCRIBE_URL=https://api.openai.com/v1` mit `MAIL_TRANSCRIBE_KEY` und
 `MAIL_TRANSCRIBE_MODEL=whisper-1`.
 
+## Medien und Sprachnachrichten senden
+
+`POST /api/whatsapp/chats/:id/media` nimmt `{ base64 | url, mime, filename, caption, kind }`
+mit `kind` = `image`, `video`, `document`, `audio` oder `voice` (ohne Angabe aus dem
+MIME-Typ abgeleitet). Grenzen: Bild und Audio 16 MB, Video 64 MB, Datei 100 MB.
+Eine `url` lädt der Server selbst; private und interne Ziele sind wie bei CardDAV
+gesperrt (`MAIL_ALLOW_PRIVATE_HOSTS`). Gesendete Dateien liegen danach wie
+empfangene unter `data/whatsapp/media`. Dieselben Regeln wie bei Text: Stundenlimit
+des Kontos, menschliche Pausen, für MCP `MAIL_WA_MCP_SEND=1` und der Modus des Kontos.
+
+`POST /api/whatsapp/chats/:id/voice` mit `{ text }` lässt den Text von einem
+Voicebox-Dienst mit geklonter Stimme
+vorlesen (`VOICE_URL`, Basic Auth über `VOICE_USER`/`VOICE_PASS`, Stimme
+`VOICE_PROFILE_ID`, Sprache `VOICE_LANGUAGE`, höchstens 1500 Zeichen) und schickt
+das Ergebnis als Sprachnachricht; der Text steht gleich als Transkript daran.
+Mit `{ base64, mime }` geht stattdessen eine vorhandene Aufnahme raus. Für
+Sprachnachrichten wandelt ffmpeg das Audio in Ogg/Opus um (im Docker-Image
+enthalten, lokal z. B. `brew install ffmpeg`).
+
 ## Sicherung und Umzug
 
 Alles, was der Server braucht, liegt im Datenverzeichnis (`data/` bzw.
@@ -721,6 +742,7 @@ Kommentaren. Werte in Klammern sind die Standardwerte aus dem Code.
 | `MAIL_IMAP_ALLOW_SELF_SIGNED=1` | IMAP ohne Zertifikatsprüfung |
 | `SEED_FILE`, `CONTENT_SEED_FILE` | andere Pfade für Konten- und Inhalts-Seed |
 | `MAIL_TRANSCRIBE_URL`, `MAIL_TRANSCRIBE_KEY`, `MAIL_TRANSCRIBE_MODEL`, `MAIL_TRANSCRIBE_LANG` (de) | Transkription von Sprachnachrichten |
+| `VOICE_URL`, `VOICE_USER`, `VOICE_PASS`, `VOICE_PROFILE_ID`, `VOICE_LANGUAGE` (de) | Sprachnachrichten mit geklonter Stimme (Voicebox) |
 | `WA_AUTOSTART=0` | gekoppelte WhatsApp-Konten beim Start nicht verbinden |
 | `WA_LOG_LEVEL` (silent) | Log-Level der WhatsApp-Bibliothek |
 | `MAIL_WA_MCP_SEND=1` | erlaubt dem MCP-Server, WhatsApp-Nachrichten zu senden |
