@@ -2045,12 +2045,46 @@ export function getWaMessageByWaId(waAccountId, chatJid, waId) {
   return db.prepare('SELECT * FROM wa_messages WHERE wa_account_id=? AND chat_jid=? AND wa_id=?')
     .get(waAccountId, chatJid, waId);
 }
-/** Rohes proto einer eigenen Nachricht – Baileys braucht das für Zustell-Wiederholungen. */
+/**
+ * proto <-> JSON für die Spalte raw. Ein nacktes JSON.stringify macht aus
+ * Buffern und Uint8Arrays Zahlenobjekte – messageSecret und Medienschlüssel
+ * kommen dann kaputt zurück, und eine Zustell-Wiederholung schickt Unsinn.
+ * Gleiches Format wie Baileys' BufferJSON (base64), liest aber auch die alten
+ * Zeilen ({"0":12,…} und {type:'Buffer',data:[…]}).
+ */
+export function rawStringify(message) {
+  return JSON.stringify(message ?? null, (_, v) => {
+    if (Buffer.isBuffer(v) || v instanceof Uint8Array || (v?.type === 'Buffer' && v.data)) {
+      return { type: 'Buffer', data: Buffer.from(v?.data || v).toString('base64') };
+    }
+    return v;
+  });
+}
+export function rawParse(raw) {
+  return JSON.parse(raw, (_, v) => {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return v;
+    if (v.type === 'Buffer' && typeof v.data === 'string') return Buffer.from(v.data, 'base64');
+    if (v.type === 'Buffer' && Array.isArray(v.data)) return Buffer.from(v.data);
+    const keys = Object.keys(v);
+    if (keys.length && keys.every(k => /^\d+$/.test(k)) && Object.values(v).every(n => typeof n === 'number')) {
+      return Buffer.from(Object.values(v));
+    }
+    return v;
+  });
+}
+
+/**
+ * Rohes proto einer eigenen Nachricht – Baileys braucht das für Zustell-Wiederholungen.
+ * Die Wiederholung kommt oft unter der @lid-Kennung, gespeichert ist aber unter der
+ * Nummer. Deshalb notfalls nur über die Nachrichten-ID suchen; die ist eindeutig genug.
+ */
 export function getWaRawMessage(waAccountId, chatJid, waId) {
   const r = db.prepare('SELECT raw FROM wa_messages WHERE wa_account_id=? AND chat_jid=? AND wa_id=? AND from_me=1')
-    .get(waAccountId, chatJid, waId);
+    .get(waAccountId, chatJid, waId)
+    || db.prepare('SELECT raw FROM wa_messages WHERE wa_account_id=? AND wa_id=? AND from_me=1 AND raw IS NOT NULL')
+      .get(waAccountId, waId);
   if (!r?.raw) return undefined;
-  try { return JSON.parse(r.raw); } catch { return undefined; }
+  try { return rawParse(r.raw) ?? undefined; } catch { return undefined; }
 }
 export function updateWaMessageStatus(waAccountId, chatJid, waId, status, error = null) {
   return db.prepare('UPDATE wa_messages SET status=?, error=? WHERE wa_account_id=? AND chat_jid=? AND wa_id=?')
@@ -2312,7 +2346,7 @@ CREATE TABLE IF NOT EXISTS wa_jid_map (
   wa_account_id INTEGER NOT NULL REFERENCES wa_accounts(id) ON DELETE CASCADE,
   lid TEXT NOT NULL,
   pn TEXT NOT NULL,
-  source TEXT,                               -- message|contact|share|manual|history
+  source TEXT,                               -- message|contact|share|manual|history|mapping
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (wa_account_id, lid)
 );

@@ -66,6 +66,22 @@ function learnMapping(session, lid, pn, source) {
   mergeChats(lidChat.id, pnChat.id, { reason: source });
 }
 
+/**
+ * Zuordnung aus einem Nachrichten-Schlüssel lernen. Baileys 7 liefert die jeweils
+ * andere Kennung in remoteJidAlt/participantAlt – mal ist das die Nummer, mal die
+ * @lid. senderPn/participantPn sind die Namen aus Baileys 6.
+ */
+function learnFromKey(session, key) {
+  if (!key) return;
+  const pair = (a, b) => {
+    if (!a || !b) return;
+    if (a.endsWith('@lid')) learnMapping(session, a, b, 'message');
+    else if (b.endsWith('@lid')) learnMapping(session, b, a, 'message');
+  };
+  if (key.participant) pair(key.participant, key.participantAlt || key.participantPn);
+  else if (key.remoteJid && !isJidGroup(key.remoteJid)) pair(key.remoteJid, key.remoteJidAlt || key.senderPn);
+}
+
 /** Zwei Einzelchats zusammenführen und die Oberfläche informieren. */
 export function mergeChats(fromId, intoId, { reason = 'manual' } = {}) {
   const from = db.getWaChat(fromId);
@@ -255,18 +271,10 @@ const snippetOf = (type, body) => {
 function toRow(session, msg, { origin = null } = {}) {
   let jid = msg.key?.remoteJid;
   if (!jid || jid === 'status@broadcast') return null;
-  // Einzelchat unter @lid: WhatsApp schickt bei eingehenden Nachrichten die
-  // Nummer als sender_pn mit. Merken – und ab hier unter der Nummer ablegen.
-  if (jid.endsWith('@lid')) {
-    if (!msg.key.fromMe && !msg.key.participant && msg.key.senderPn) {
-      learnMapping(session, jid, msg.key.senderPn, 'message');
-    }
-    jid = canonicalJid(session, jid);
-  }
-  // Gruppen: Teilnehmer können ebenfalls als @lid kommen, participant_pn verrät die Nummer.
-  if (msg.key?.participant && msg.key.participantPn) {
-    learnMapping(session, msg.key.participant, msg.key.participantPn, 'message');
-  }
+  // Einzelchat unter @lid, oder Gruppen-Teilnehmer als @lid: der Schlüssel trägt
+  // die andere Kennung mit. Merken – und ab hier unter der Nummer ablegen.
+  learnFromKey(session, msg.key);
+  if (jid.endsWith('@lid')) jid = canonicalJid(session, jid);
   const d = describeMessage(msg);
   const ts = Number(msg.messageTimestamp?.low ?? msg.messageTimestamp ?? 0) || nowSec();
   const isGroup = isJidGroup(jid);
@@ -295,7 +303,9 @@ function toRow(session, msg, { origin = null } = {}) {
     wa_id: msg.key.id,
     chat_jid: jid,
     sender_jid: msg.key.participant
-      ? (msg.key.participantPn ? jidNormalizedUser(msg.key.participantPn) : canonicalJid(session, msg.key.participant))
+      ? (phoneOf(msg.key.participantAlt || msg.key.participantPn)
+        ? jidNormalizedUser(msg.key.participantAlt || msg.key.participantPn)
+        : canonicalJid(session, msg.key.participant))
       : (msg.key.fromMe ? session.jid : jid),
     sender_name: msg.pushName || null,
     from_me: msg.key.fromMe ? 1 : 0,
@@ -313,7 +323,7 @@ function toRow(session, msg, { origin = null } = {}) {
     // Zustell-Wiederholungen) UND für alles mit Medien: ohne das Original kann
     // eine Sprachnachricht später nicht mehr heruntergeladen werden.
     // … und bei nicht erkannten Typen, damit sich nachvollziehen lässt, was da kam.
-    raw: (msg.key.fromMe || d.media_mime || d.type === 'unsupported') ? JSON.stringify(msg.message ?? null) : null,
+    raw: (msg.key.fromMe || d.media_mime || d.type === 'unsupported') ? db.rawStringify(msg.message) : null,
     _msg: msg,
   };
 }
@@ -548,7 +558,7 @@ async function downloadMessageMediaInner(row, messageId) {
   };
 
   if (row.raw) {
-    const msg = { key, message: JSON.parse(row.raw) };
+    const msg = { key, message: db.rawParse(row.raw) };
     try {
       return await downloadMediaToDisk(session, messageId, msg);
     } catch (e) {
@@ -557,7 +567,7 @@ async function downloadMessageMediaInner(row, messageId) {
       log('Erster Versuch fehlgeschlagen, erneuere URL:', e.message);
       const refreshed = await session.sock.updateMediaMessage(msg);
       db.db.prepare('UPDATE wa_messages SET raw=? WHERE id=?')
-        .run(JSON.stringify(refreshed.message), messageId);
+        .run(db.rawStringify(refreshed.message), messageId);
       return downloadMediaToDisk(session, messageId, refreshed);
     }
   }
@@ -756,9 +766,7 @@ function wireEvents(session, sock, authDir) {
       // Nachricht, auf die sie zeigen – sonst zerreißt es den Verlauf.
       const react = msg.message?.reactionMessage;
       if (react?.key?.id) {
-        if (msg.key.remoteJid?.endsWith('@lid') && !msg.key.fromMe && !msg.key.participant && msg.key.senderPn) {
-          learnMapping(session, msg.key.remoteJid, msg.key.senderPn, 'message');
-        }
+        learnFromKey(session, msg.key);
         const chatJid = canonicalJid(session, msg.key.remoteJid);
         db.setWaReaction({
           wa_account_id: session.id,
@@ -868,7 +876,7 @@ function wireEvents(session, sock, authDir) {
       if (!c.id) continue;
       // Kontakte tragen oft beide Kennungen – die beste Quelle für die Zuordnung.
       const lid = c.lid || (c.id.endsWith('@lid') ? c.id : null);
-      const pn = c.jid || (c.id.endsWith('@s.whatsapp.net') ? c.id : null);
+      const pn = c.phoneNumber || c.jid || (c.id.endsWith('@s.whatsapp.net') ? c.id : null);
       if (lid && pn) learnMapping(session, lid, pn, 'contact');
       const jid = isJidGroup(c.id) ? c.id : (pn || canonicalJid(session, c.id));
       db.upsertWaContact(session.id, {
@@ -884,6 +892,9 @@ function wireEvents(session, sock, authDir) {
       }
     }
   });
+
+  // Baileys 7 meldet neu entdeckte Zuordnungen selbst (noch nicht zuverlässig).
+  sock.ev.on('lid-mapping.update', guard(({ lid, pn }) => learnMapping(session, lid, pn, 'mapping')));
 
   // Jemand hat seine Nummer freigegeben – die direkteste Zuordnung überhaupt.
   sock.ev.on('chats.phoneNumberShare', guard(({ lid, jid }) => learnMapping(session, lid, jid, 'share')));
@@ -1101,7 +1112,9 @@ export async function resolveJid(id, phone) {
   const [hit] = await session.sock.onWhatsApp(digits + '@s.whatsapp.net');
   if (!hit?.exists) return null;
   const pn = jidNormalizedUser(hit.jid);
-  if (hit.lid) learnMapping(session, hit.lid, pn, 'contact');
+  // Baileys 7 liefert hier keine lid mehr, die steht im eigenen Zuordnungsspeicher.
+  const lid = hit.lid || await session.sock.signalRepository?.lidMapping?.getLIDForPN(pn).catch(() => null);
+  if (lid) learnMapping(session, lid, pn, 'contact');
   return pn;
 }
 
@@ -1124,7 +1137,7 @@ export async function sendText(id, jid, text, { quotedWaId = null, origin = 'ui'
     let quoted;
     if (quotedWaId) {
       const q = db.getWaMessageByWaId(id, jid, quotedWaId);
-      if (q?.raw) quoted = { key: { remoteJid: jid, id: q.wa_id, fromMe: !!q.from_me }, message: JSON.parse(q.raw) };
+      if (q?.raw) quoted = { key: { remoteJid: jid, id: q.wa_id, fromMe: !!q.from_me }, message: db.rawParse(q.raw) };
     }
     const res = await session.sock.sendMessage(jid, { text }, quoted ? { quoted } : {});
     const row = toRow(session, res, { origin });
