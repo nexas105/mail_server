@@ -60,6 +60,8 @@ services:
       - VOICE_PASS=${VOICE_PASS:-}
       - VOICE_PROFILE_ID=${VOICE_PROFILE_ID:-}
       - VOICE_LANGUAGE=${VOICE_LANGUAGE:-de}
+      - VOICE_ENGINE=${VOICE_ENGINE:-}
+      - VOICE_RVC=${VOICE_RVC:-0}
     volumes:
       - mail-data:/data
     restart: unless-stopped

@@ -12,6 +12,10 @@
  *   VOICE_PASS
  *   VOICE_PROFILE_ID  Stimmprofil (die geklonte Stimme) für alle Aufrufe ohne eigenes
  *   VOICE_LANGUAGE    Sprachcode, Standard de
+ *   VOICE_ENGINE      TTS-Modell in Voicebox (qwen, chatterbox …), Standard: das des Profils
+ *   VOICE_RVC         1 = Ergebnis zusätzlich durch RVC (${VOICE_URL}/rvc/convert) schicken.
+ *                     Das TTS liefert Sprechweise und Betonung, RVC die echte Klangfarbe –
+ *                     der Zero-Shot-Klon allein klingt nur ungefähr nach der Person.
  */
 
 /** Längere Texte werden zur Hörbuch-Sprachnachricht – und blockieren die GPU. */
@@ -24,6 +28,8 @@ export function ttsConfig() {
     pass: process.env.VOICE_PASS || '',
     profileId: process.env.VOICE_PROFILE_ID || '',
     language: process.env.VOICE_LANGUAGE || 'de',
+    engine: process.env.VOICE_ENGINE || '',
+    rvc: process.env.VOICE_RVC === '1',
   };
 }
 
@@ -58,7 +64,10 @@ export async function synthesize(text, { profileId, language, timeoutMs = 180_00
     res = await fetch(`${cfg.url}/generate/stream`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ profile_id: profile, text: t, language: language || cfg.language }),
+      body: JSON.stringify({
+        profile_id: profile, text: t, language: language || cfg.language,
+        ...(cfg.engine ? { engine: cfg.engine } : {}),
+      }),
       signal: AbortSignal.timeout(timeoutMs),
       // Keine Weiterleitungen: sonst ginge der Basic-Auth-Header womöglich an ein anderes Ziel.
       redirect: 'error',
@@ -76,5 +85,29 @@ export async function synthesize(text, { profileId, language, timeoutMs = 180_00
     throw new Error(`Sprachausgabe fehlgeschlagen (HTTP ${res.status}): ${msg}`);
   }
   if (!buf.length) throw new Error('Sprachdienst hat leeres Audio geliefert');
-  return buf;
+  return cfg.rvc ? convertVoice(buf, { headers, timeoutMs }) : buf;
+}
+
+/** WAV durch RVC schicken – gleiche Basis-URL und Zugangsdaten wie Voicebox. */
+async function convertVoice(wav, { headers, timeoutMs }) {
+  const cfg = ttsConfig();
+  let res;
+  try {
+    res = await fetch(`${cfg.url}/rvc/convert`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'audio/wav' },
+      body: wav,
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: 'error',
+    });
+  } catch (e) {
+    const why = e.name === 'TimeoutError' ? `keine Antwort nach ${Math.round(timeoutMs / 1000)} s` : e.message;
+    throw new Error(`Stimmumwandlung (RVC) nicht erreichbar: ${why}`);
+  }
+  const out = Buffer.from(await res.arrayBuffer());
+  if (!res.ok) {
+    throw new Error(`Stimmumwandlung (RVC) fehlgeschlagen (HTTP ${res.status}): ${out.toString('utf8', 0, Math.min(out.length, 400))}`);
+  }
+  if (!out.length) throw new Error('RVC hat leeres Audio geliefert');
+  return out;
 }
