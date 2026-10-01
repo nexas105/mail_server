@@ -2111,10 +2111,15 @@ export function searchWaMessages({ query, waAccountId = null, limit = 30 } = {})
      WHERE ${where} ORDER BY m.ts DESC LIMIT ?`).all(...args);
 }
 /** Wie viele eigene Nachrichten in der letzten Stunde – für die Versand-Bremse. */
+/**
+ * Was das Relay in der letzten Stunde verschickt hat. Nur Nachrichten mit origin
+ * zählen – was jemand selbst am Handy tippt, kommt ohne origin herein und
+ * verbraucht das Kontingent nicht.
+ */
 export function waSentLastHour(waAccountId) {
   return db.prepare(
     `SELECT COUNT(*) AS n FROM wa_messages
-     WHERE wa_account_id=? AND from_me=1 AND ts > ?`)
+     WHERE wa_account_id=? AND from_me=1 AND origin IS NOT NULL AND ts > ?`)
     .get(waAccountId, Math.floor(Date.now() / 1000) - 3600).n;
 }
 /** Hat dieser Chat je eine eingehende Nachricht? Grundlage für mcp_send_mode='known'. */
