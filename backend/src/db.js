@@ -1070,8 +1070,54 @@ export function deleteAsset(id) {
 }
 
 // ---- Posteingang (empfangene Mails) --------------------------------------
+// Datei-Anhänge empfangener Mails (auf Platte unter data/message_attachments
+// gespeichert, ein Unterordner je Nachricht). Getrennt von `attachments`
+// (Entwürfe) – andere Lebensdauer: hier IMAP-Herkunft statt per MCP hochgeladen.
+const MESSAGE_ATTACH_DIR = path.join(DATA_DIR, 'message_attachments');
+fs.mkdirSync(MESSAGE_ATTACH_DIR, { recursive: true });
+db.exec(`CREATE TABLE IF NOT EXISTS message_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  mimetype TEXT,
+  size INTEGER,
+  is_inline INTEGER NOT NULL DEFAULT 0,
+  stored_path TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments(message_id)');
+
+// Speichert einen von mailparser gelieferten Anhang (filename/contentType/
+// contentDisposition/content als Buffer) zu einer bereits vorhandenen
+// Nachricht. Rein dekorative, per cid: im HTML eingebundene Bilder (Logos in
+// Signaturen) kommen hier nicht an – die filtert der Aufrufer über `related`
+// vorher raus, sonst wäre jede Mail "voller Anhänge".
+export function addMessageAttachment(messageId, att) {
+  const dir = path.join(MESSAGE_ATTACH_DIR, String(messageId));
+  fs.mkdirSync(dir, { recursive: true });
+  const safe = String(att.filename || 'anhang').replace(/[^\w.\-]+/g, '_').slice(0, 150) || 'anhang';
+  const stored = path.join(dir, `${Date.now()}_${safe}`);
+  fs.writeFileSync(stored, att.content);
+  const r = db.prepare(`INSERT INTO message_attachments (message_id, filename, mimetype, size, is_inline, stored_path)
+    VALUES (?, ?, ?, ?, ?, ?)`).run(
+    messageId, att.filename || safe, att.contentType || null,
+    att.size ?? att.content?.length ?? null,
+    att.contentDisposition === 'inline' ? 1 : 0, stored);
+  return getMessageAttachment(r.lastInsertRowid);
+}
+export function getMessageAttachment(id) {
+  return db.prepare('SELECT * FROM message_attachments WHERE id=?').get(id);
+}
+// Liste ohne stored_path (Server-interner Pfad geht niemanden außerhalb an).
+export function listMessageAttachments(messageId) {
+  return db.prepare(`SELECT id, message_id, filename, mimetype, size, is_inline, created_at
+    FROM message_attachments WHERE message_id=? ORDER BY id`).all(messageId);
+}
+
 // Fügt eine Mail ein; existiert die UID im Ordner bereits, passiert nichts
-// (idempotenter Sync). Gibt true zurück, wenn eine neue Zeile angelegt wurde.
+// (idempotenter Sync). Gibt { id, isNew } zurück – `id` auch beim bereits
+// vorhandenen Datensatz, damit Aufrufer (z.B. Anhänge speichern) ihn immer
+// adressieren können.
 export function insertMessage(m) {
   const r = db.prepare(`INSERT OR IGNORE INTO messages
     (account_id, folder, uid, message_id, from_name, from_email, to_text, cc_text, reply_to,
@@ -1082,7 +1128,9 @@ export function insertMessage(m) {
     m.cc_text ?? null, m.reply_to ?? null, m.refs ?? null,
     m.subject ?? null, m.date ?? null, m.snippet ?? null,
     m.text ?? null, m.html ?? null, m.seen ? 1 : 0, m.flagged ? 1 : 0, m.answered ? 1 : 0);
-  return r.changes > 0;
+  if (r.changes > 0) return { id: r.lastInsertRowid, isNew: true };
+  const existing = getMessageByUid(m.account_id, m.folder || 'INBOX', m.uid);
+  return { id: existing?.id ?? null, isNew: false };
 }
 // Höchste bereits gespeicherte UID eines Ordners (für inkrementellen Abruf).
 export function maxMessageUid(accountId, folder = 'INBOX') {

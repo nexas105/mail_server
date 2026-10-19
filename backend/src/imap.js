@@ -1,7 +1,7 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import {
-  getImapCreds, insertMessage, maxMessageUid,
+  getImapCreds, insertMessage, maxMessageUid, addMessageAttachment,
   getMessageByUid, findSentRecipient, recordBounce, markMessageBounce, recipientAccountId,
 } from './db.js';
 import { parseReferences } from './reply.js';
@@ -218,7 +218,7 @@ export async function fetchInbox(account, { folder = 'INBOX', limit = 50, onProg
           || (env.replyTo || []).map(a => (a.name ? `"${a.name}" <${a.address}>` : a.address)).join(', ')
           || null;
         const chain = [...parseReferences(parsed.references), ...parseReferences(parsed.inReplyTo || env.inReplyTo)];
-        const isNew = insertMessage({
+        const { id: localId, isNew } = insertMessage({
           account_id: account.id,
           folder,
           uid: msg.uid,
@@ -242,6 +242,7 @@ export async function fetchInbox(account, { folder = 'INBOX', limit = 50, onProg
         if (isNew) {
           saved++;
           bounced += noteBounce(account, folder, msg.uid, parsed) ? 1 : 0;
+          if (localId) saveRealAttachments(localId, parsed.attachments);
         }
         onProgress({ index, total });
       }
@@ -253,6 +254,44 @@ export async function fetchInbox(account, { folder = 'INBOX', limit = 50, onProg
   return { fetched, saved, bounced };
 }
 
+// Speichert aus einer mailparser-Anhangsliste nur die echten Datei-Anhänge.
+// `related` setzt mailparser bei Bildern, die per cid: im HTML referenziert
+// werden (Logos in Signaturen) – das sind keine Anhänge im eigentlichen Sinn,
+// sonst hätte jede Mail mit Signatur "Anhänge". Einzelne defekte Anhänge
+// dürfen den Sync nicht abbrechen, darum pro Anhang try/catch.
+function saveRealAttachments(messageId, attachments) {
+  const saved = [];
+  for (const att of attachments || []) {
+    if (att.related) continue;
+    try { saved.push(addMessageAttachment(messageId, att)); } catch { /* dieser eine Anhang wird übersprungen */ }
+  }
+  return saved;
+}
+
+/**
+ * Holt die echten Datei-Anhänge einer bereits gespeicherten Mail nachträglich
+ * per IMAP (z.B. für Mails, die vor Einführung der Anhangsspeicherung
+ * synchronisiert wurden). `message` braucht { id, folder, uid }.
+ */
+export async function fetchMessageAttachments(account, message) {
+  const client = clientFor(account);
+  await client.connect();
+  try {
+    const lock = await client.getMailboxLock(message.folder);
+    let parsed = null;
+    try {
+      for await (const msg of client.fetch({ uid: message.uid }, { uid: true, source: true }, { uid: true })) {
+        parsed = await simpleParser(msg.source);
+      }
+    } finally {
+      lock.release();
+    }
+    if (!parsed) throw new Error('Mail nicht mehr auf dem Server gefunden (UID ungültig oder verschoben)');
+    return saveRealAttachments(message.id, parsed.attachments);
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
 
 /**
  * Ordnet eine eingegangene Unzustellbarkeitsmeldung dem ursprünglichen

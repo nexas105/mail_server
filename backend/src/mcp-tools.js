@@ -5,7 +5,7 @@ import path from 'node:path';
 import * as db from './db.js';
 import { sendDraft, renderPreview, verifyAccount, sendTestMail, preflightDraft } from './mailer.js';
 import { fetchContacts } from './carddav.js';
-import { fetchInbox, verifyImap, listMailboxes, createMailbox, moveMessages } from './imap.js';
+import { fetchInbox, verifyImap, listMailboxes, createMailbox, moveMessages, fetchMessageAttachments } from './imap.js';
 import { createReplyDraft } from './reply.js';
 import * as gh from './github.js';
 import { policy, assertToolAllowed, resolveAttachmentPath } from './mcp-policy.js';
@@ -687,6 +687,47 @@ tool(
       m.seen = 1;
     }
     return ok(m);
+  },
+);
+tool(
+  'list_message_attachments',
+  'Echte Datei-Anhänge einer empfangenen Mail (PDF, Office, Bilder …) – ohne reine Signatur-/Deko-Bilder, '
+  + 'die nur per cid: im HTML eingebunden sind. Liefert leere Liste, wenn die Mail vor Einführung dieser '
+  + 'Funktion synchronisiert wurde oder keine Anhänge hat; im ersten Fall vorher fetch_message_attachments '
+  + 'aufrufen. id hier dient get_message_attachment zum Herunterladen.',
+  { message_id: z.number().int() },
+  async ({ message_id }) => {
+    if (!db.getMessage(message_id)) return ok({ error: 'Mail nicht gefunden' });
+    return ok(db.listMessageAttachments(message_id));
+  },
+);
+tool(
+  'get_message_attachment',
+  'Lädt einen Datei-Anhang einer empfangenen Mail als base64 herunter (id aus list_message_attachments).',
+  { id: z.number().int() },
+  async ({ id }) => {
+    const a = db.getMessageAttachment(id);
+    if (!a) return ok({ error: 'Anhang nicht gefunden' });
+    const buf = fs.readFileSync(a.stored_path);
+    return ok({
+      id: a.id, message_id: a.message_id, filename: a.filename,
+      mimetype: a.mimetype, size: a.size, base64: buf.toString('base64'),
+    });
+  },
+);
+tool(
+  'fetch_message_attachments',
+  'Holt die echten Datei-Anhänge einer bereits gespeicherten Mail nachträglich per IMAP (nötig für Mails, '
+  + 'die vor Einführung der Anhangsspeicherung synchronisiert wurden – list_message_attachments liefert für '
+  + 'die sonst dauerhaft eine leere Liste). Danach mit list_message_attachments / get_message_attachment abrufen.',
+  { message_id: z.number().int() },
+  async ({ message_id }) => {
+    const m = db.getMessage(message_id);
+    if (!m) return ok({ error: 'Mail nicht gefunden' });
+    const account = db.getAccount(m.account_id);
+    if (!account?.imap_host) return ok({ error: 'Kein IMAP-Host konfiguriert' });
+    const saved = await fetchMessageAttachments(account, m);
+    return ok({ message_id, saved: saved.length, attachments: saved.map(a => ({ id: a.id, filename: a.filename, mimetype: a.mimetype, size: a.size })) });
   },
 );
 
