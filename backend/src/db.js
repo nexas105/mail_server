@@ -1149,6 +1149,37 @@ export function listMessages({ accountId = null, folder = 'INBOX', limit = 100 }
         : db.prepare(`SELECT ${cols} FROM messages ORDER BY COALESCE(date, created_at) DESC LIMIT ?`).all(limit);
   return rows;
 }
+/**
+ * Gezielte Suche im Posteingang (Absender, Betreff, Zeitraum, Ordner, Volltext).
+ *
+ * Ohne das hier müsste ein Aufrufer, der eine bestimmte Mail sucht, erst den
+ * ganzen Ordner per listMessages laden und selbst filtern – bei einem
+ * gewachsenen Postfach unnötig teuer. since/until erwarten ISO-Daten
+ * (vergleichbar mit der gespeicherten date-Spalte, z.B. "2026-10-01").
+ */
+export function searchMessages({
+  accountId = null, folder = null, from = null, subject = null,
+  text = null, since = null, until = null, limit = 50,
+} = {}) {
+  const cols = 'id, account_id, folder, uid, message_id, from_name, from_email, to_text, subject, date, snippet, seen, flagged, answered, created_at';
+  const where = [];
+  const args = [];
+  if (accountId) { where.push('account_id = ?'); args.push(accountId); }
+  if (folder) { where.push('folder = ?'); args.push(folder); }
+  if (from) { where.push('(from_email LIKE ? OR from_name LIKE ?)'); args.push(`%${from}%`, `%${from}%`); }
+  if (subject) { where.push('subject LIKE ?'); args.push(`%${subject}%`); }
+  if (text) {
+    where.push('(text LIKE ? OR html LIKE ? OR subject LIKE ? OR snippet LIKE ?)');
+    args.push(`%${text}%`, `%${text}%`, `%${text}%`, `%${text}%`);
+  }
+  if (since) { where.push('date >= ?'); args.push(since); }
+  if (until) { where.push('date <= ?'); args.push(until); }
+  const sql = `SELECT ${cols} FROM messages`
+    + (where.length ? ` WHERE ${where.join(' AND ')}` : '')
+    + ' ORDER BY COALESCE(date, created_at) DESC LIMIT ?';
+  args.push(limit);
+  return db.prepare(sql).all(...args);
+}
 export function listMessageFolders(accountId = null) {
   return accountId
     ? db.prepare(`SELECT folder, COUNT(*) count, SUM(CASE WHEN seen=0 THEN 1 ELSE 0 END) unread

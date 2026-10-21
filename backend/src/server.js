@@ -592,6 +592,17 @@ app.get('/api/messages', wrap((req, res) => res.json(db.listMessages({
 app.get('/api/message-folders', wrap((req, res) => res.json(
   db.listMessageFolders(req.query.account_id ? +req.query.account_id : null),
 )));
+// Gezielte Suche statt kompletter Ordner-Liste – siehe db.searchMessages.
+app.get('/api/messages/search', wrap((req, res) => res.json(db.searchMessages({
+  accountId: req.query.account_id ? +req.query.account_id : null,
+  folder: req.query.folder || null,
+  from: req.query.from || null,
+  subject: req.query.subject || null,
+  text: req.query.text || null,
+  since: req.query.since || null,
+  until: req.query.until || null,
+  limit: +req.query.limit || 50,
+}))));
 app.get('/api/messages/unread-count', wrap((req, res) => res.json({
   count: db.unreadCount(req.query.account_id ? +req.query.account_id : null),
 })));

@@ -668,6 +668,26 @@ tool(
   async ({ account_id, limit }) => ok(db.listMessages({ accountId: account_id ?? null, limit })),
 );
 tool(
+  'search_messages',
+  'Durchsucht den Posteingang gezielt (Absender, Betreff, Zeitraum, Ordner, Volltext) statt alle Mails '
+  + 'per list_inbox zu laden. Alle Filter sind optional und kombinierbar; ohne Filter wie list_inbox.',
+  {
+    account_id: z.number().int().optional().describe('Optional: nur Mails dieses Accounts'),
+    folder: z.string().optional().describe('IMAP-Ordner, z.B. "INBOX" – ohne Angabe alle Ordner'),
+    from: z.string().optional().describe('Teilstring auf Absender-Adresse oder -Name'),
+    subject: z.string().optional().describe('Teilstring im Betreff'),
+    text: z.string().optional().describe('Volltext – durchsucht Betreff, Textauszug und Body'),
+    since: z.string().optional().describe('Nur Mails ab diesem Datum (ISO, z.B. "2026-10-01")'),
+    until: z.string().optional().describe('Nur Mails bis zu diesem Datum (ISO)'),
+    limit: z.number().int().optional().default(50),
+  },
+  async ({ account_id, folder, from, subject, text, since, until, limit }) => ok(
+    db.searchMessages({
+      accountId: account_id ?? null, folder: folder ?? null, from: from ?? null,
+      subject: subject ?? null, text: text ?? null, since: since ?? null, until: until ?? null, limit,
+    })),
+);
+tool(
   'get_message',
   'Liefert eine empfangene Mail inkl. Text/HTML-Body. Lesen verändert nichts – die Mail bleibt '
   + 'ungelesen, solange nicht mark_seen=true gesetzt wird (oder set_message_flags genutzt wird).',

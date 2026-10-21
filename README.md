@@ -370,6 +370,7 @@ nicht auf.
 | `get_delivery_status` / `list_send_events` | Zustellung, Öffnungen und Unzustellbarkeit je Entwurf |
 | `reply_to_message` | Antwort-Entwurf auf eine empfangene Mail (mit Zitat) |
 | `sync_inbox` / `list_inbox` / `get_message` / `move_messages` | Posteingang per IMAP abrufen, lesen, verschieben |
+| `search_messages` | Posteingang gezielt filtern (Absender, Betreff, Zeitraum, Ordner, Volltext) statt alles zu laden |
 | `list_contacts` / `add_contact` / `list_lists` / `import_contacts` | Kontakte und Listen |
 | `get_contact_context` / `set_contact_fact` / `set_writing_style` | Wissen für die KI je Kontakt |
 | `list_brands` / `apply_brand_to_draft` | Marken und Farbpaletten |
