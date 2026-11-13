@@ -13,6 +13,7 @@ import { getServiceToken } from './auth.js';
 import { trackingBaseUrl, trackingReachable } from './tracking.js';
 import { logMcpEvent, summarizeArgs } from './mcp-access.js';
 import { registerContextTools } from './mcp-context-tools.js';
+import { createUpload, takeUpload } from './mcp-uploads.js';
 
 /**
  * Baut eine frische MCP-Server-Instanz mit allen Werkzeugen.
@@ -87,6 +88,8 @@ const server = new McpServer({ name: 'mail-server', version: '1.0.0' });
 
 const ok = obj => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] });
 const draftLink = id => `${LINK}/draft/${id}`;
+// Uploads gehören dem Token, das sie angelegt hat (siehe mcp-uploads.js).
+const uploadOwner = `${ctx.tokenId ?? ''}|${ctx.tokenName ?? ''}`;
 
 const recipientSchema = z.object({
   email: z.string().email(),
@@ -117,7 +120,8 @@ const attachmentSchema = z.object({
   base64: z.string().optional().describe('Alternative zu path: Dateiinhalt base64-kodiert (dann ist filename Pflicht)'),
   filename: z.string().optional().describe('Dateiname beim Empfänger (Standard: der Name aus path)'),
   mimetype: z.string().optional().describe('Standard: aus der Dateiendung abgeleitet'),
-}).describe('Datei-Anhang: entweder path (empfohlen) oder base64 + filename');
+  upload_id: z.string().optional().describe('Über HTTP der bevorzugte Weg: ID aus create_upload, nachdem die Datei per curl -T an die upload_url geschickt wurde'),
+}).describe('Datei-Anhang: path (nur lokal), upload_id (aus create_upload) oder base64 + filename');
 
 /**
  * Pfad für Fehlermeldungen. Über HTTP sitzt der Aufrufer woanders – der
@@ -127,6 +131,12 @@ const shownPath = file => (policy.transport === 'http' ? path.basename(file) : f
 
 /** Liest einen Anhang aus path oder base64 und normalisiert ihn für db.addAttachment. */
 function readAttachment(a) {
+  if (a.upload_id) {
+    const up = takeUpload(a.upload_id, uploadOwner);
+    if (up.buffer.length > ATTACH_MAX_BYTES) throw new Error(`Zu groß (${(up.buffer.length / 1048576).toFixed(1)} MB, max. 20 MB): ${up.filename}`);
+    const filename = a.filename || up.filename;
+    return { filename, mimetype: a.mimetype || up.mimetype || mimeForName(filename), base64: up.buffer.toString('base64'), size: up.buffer.length };
+  }
   if (a.path) {
     // Die Richtlinie entscheidet, ob und aus welchem Ordner überhaupt gelesen werden darf.
     const file = resolveAttachmentPath(a.path);
@@ -143,7 +153,7 @@ function readAttachment(a) {
     if (size > ATTACH_MAX_BYTES) throw new Error(`Zu groß (${(size / 1048576).toFixed(1)} MB, max. 20 MB): ${a.filename}`);
     return { filename: a.filename, mimetype: a.mimetype || mimeForName(a.filename), base64: a.base64, size };
   }
-  throw new Error('Anhang braucht entweder path oder base64');
+  throw new Error('Anhang braucht upload_id, path oder base64');
 }
 
 /** Hängt eine Liste an einen Entwurf; prüft die Gesamtgröße vorab (alles oder nichts). */
@@ -401,14 +411,29 @@ tool(
 );
 
 tool(
+  'create_upload',
+  'Für Dateien vom eigenen Rechner, wenn dieser MCP-Server remote läuft: liefert eine einmalige Upload-URL (15 Min. gültig). '
+  + 'Datei hochladen mit: curl -sS -T <datei> <upload_url> – danach upload_id bei add_attachment oder create_draft (attachments) angeben. Spart die base64-Übertragung.',
+  {
+    filename: z.string().describe('Dateiname beim Empfänger, z.B. "Angebot.pdf"'),
+    mimetype: z.string().optional().describe('Standard: aus der Dateiendung abgeleitet'),
+  },
+  async ({ filename, mimetype }) => {
+    const up = createUpload({ filename, mimetype, owner: uploadOwner });
+    return ok({ ...up, how: `curl -sS -T <datei> '${up.upload_url}'` });
+  },
+);
+
+tool(
   'add_attachment',
-  'Hängt eine Datei an einen bestehenden Entwurf (PDF, Office, Bilder …). Gib bevorzugt "path" an – die Datei liegt auf demselben Rechner wie dieser Server, das spart die base64-Übertragung. Anhänge sind echte Datei-Anhänge (anders als add_asset, das Bilder INLINE ins HTML einbettet).',
+  'Hängt eine Datei an einen bestehenden Entwurf (PDF, Office, Bilder …). Läuft dieser Server remote (HTTP), liegt die Datei auf DEINEM Rechner: erst create_upload, dann curl -T <datei> <upload_url>, dann hier upload_id angeben. "path" geht nur, wenn der Server auf demselben Rechner läuft. Anhänge sind echte Datei-Anhänge (anders als add_asset, das Bilder INLINE ins HTML einbettet).',
   {
     draft_id: z.number().int(),
     path: z.string().optional().describe('Pfad zur Datei, z.B. "~/Downloads/Bewerbung.pdf"'),
     base64: z.string().optional().describe('Alternative zu path (dann filename angeben)'),
     filename: z.string().optional().describe('Dateiname beim Empfänger (Standard: Name aus path)'),
     mimetype: z.string().optional().describe('Standard: aus der Dateiendung abgeleitet'),
+    upload_id: z.string().optional().describe('ID aus create_upload (über HTTP der bevorzugte Weg für Dateien vom eigenen Rechner)'),
   },
   async ({ draft_id, ...a }) => {
     if (!db.getDraft(draft_id)) throw new Error(`Entwurf ${draft_id} nicht gefunden`);

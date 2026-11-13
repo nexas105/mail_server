@@ -14,6 +14,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createMcpServer } from './mcp-tools.js';
 import { policy, configure } from './mcp-policy.js';
 import { verifyMcpToken, countActiveMcpTokens } from './mcp-access.js';
+import { receiveUpload, rememberBaseUrl, UPLOAD_MAX_BYTES } from './mcp-uploads.js';
 
 const log = (...args) => console.error('[mcp-http]', ...args);
 const list = v => String(v || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -90,8 +91,19 @@ export async function startHttpServer() {
     sessions: sessions.size, readonly: policy.readonly, time: new Date().toISOString(),
   }));
 
+  // ---- Datei-Upload (siehe mcp-uploads.js) --------------------------------
+  // Kein Bearer-Token: die zufällige, einmalige URL aus create_upload ist die
+  // Berechtigung – so reicht ein schlichtes curl -T.
+  app.put('/upload/:token', express.raw({ type: () => true, limit: UPLOAD_MAX_BYTES }), (req, res) => {
+    const r = receiveUpload(req.params.token, req.body);
+    if (r.error) return res.status(r.status).json({ ok: false, error: r.error });
+    return res.json(r.data);
+  });
+
   // ---- Token-Prüfung ------------------------------------------------------
   app.use(PATH_, (req, res, next) => {
+    // Öffentliche Adresse für Upload-URLs merken (falls MCP_PUBLIC_URL fehlt).
+    rememberBaseUrl(`${req.get('x-forwarded-proto') || req.protocol}://${req.get('x-forwarded-host') || req.get('host')}`);
     const header = req.get('authorization') || '';
     const supplied = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
 
