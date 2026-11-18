@@ -392,16 +392,22 @@ Alle Werkzeuge zusammen belegen im KI-Client rund 22.000 Token Kontext, bevor
 
 | Set | Inhalt | ca. Token |
 |---|---|---|
-| `mail` | Posteingang lesen/suchen/sortieren, Entwürfe, Antworten, Anhänge, Versand | 9.000 |
+| `mail` | Posteingang lesen/suchen/sortieren, Entwürfe, Antworten, Anhänge, Versand – inkl. Vorlagen und Marken lesen/anwenden | 9.500 |
 | `whatsapp` | Chats, Nachrichten, Senden, Planen, Sprachnachrichten | 4.500 |
 | `contacts` | Adressbuch, Listen, Kontakt-Kontext, Schreibstile, Regeln | 4.700 |
-| `design` | Vorlagen, Marken, Platzhalter-Felder, Bilder | 2.200 |
+| `design` | Vorlagen, Marken, Platzhalter-Felder, Bilder anlegen und pflegen | 2.200 |
 | `github` | An Kontakten verknüpfte Repos | 1.800 |
 | `admin` | SMTP/IMAP-Konten, Einstellungen, Tracking | 1.800 |
 | `brain` | Notizen und Dateien (PDF, Bilder …), allgemein und je Projekt (siehe unten) | 2.800 |
 
 `get_writing_briefing` und der Kontakt-Kontext stecken in `mail` und
 `whatsapp`, `list_contacts`/`list_lists`/`list_smtp_accounts` zusätzlich in `mail`.
+
+Header, Footer und Marke: `create_draft` erwartet in `html` nur den Inhalt. Header
+und Footer kommen als Standard des Absenders, die Marke als Standardmarke –
+überschreibbar mit `header_template_id`, `footer_template_id`, `brand_id` (`null` =
+ohne), auch nachträglich per `update_draft`. Die Antwort meldet unter `bausteine`,
+was tatsächlich dranhängt.
 
 ```bash
 # HTTP: eigener Pfad je Set, mit + kombinierbar

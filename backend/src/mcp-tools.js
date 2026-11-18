@@ -48,6 +48,7 @@ function buildInstructions(selected) {
   if (has('mail') || has('whatsapp')) lines.push('Vor dem Verfassen einer Nachricht an eine Person: get_writing_briefing (Kontext, Stil, fehlende Angaben).');
   if (has('mail')) {
     lines.push('Mail: create_draft/reply_to_message legen nur Entwürfe an, der Nutzer sendet in der UI. '
+      + 'html ist nur der Inhalt – Header, Footer und Marke hängt der Server an (Standard oder header_template_id/footer_template_id/brand_id). '
       + 'send_draft nur auf ausdrücklichen Wunsch. Mails finden: search_messages (gefiltert) statt list_inbox; '
       + 'get_message liefert standardmäßig nur Text (format="html" für HTML). '
       + 'Antworten: erst get_thread (Verlauf), dann reply_to_message – das legt einen Entwurf im Gesprächsfaden an.');
@@ -162,6 +163,54 @@ const compactMessage = m => ({
   unread: !m.seen || undefined, flagged: !!m.flagged || undefined, answered: !!m.answered || undefined,
 });
 
+/**
+ * Was am Entwurf automatisch dranhängt – damit die KI Header, Footer und Marke
+ * NICHT selbst ins HTML schreibt (sonst stehen sie doppelt in der Mail).
+ */
+function bausteine(draft) {
+  const t = id => { const x = id ? db.getTemplate(id) : null; return x ? { id: x.id, name: x.name } : null; };
+  let vars = {};
+  try { vars = draft.vars ? (typeof draft.vars === 'string' ? JSON.parse(draft.vars) : draft.vars) : {}; } catch { /* egal */ }
+  // Eine Marke gilt als gesetzt, wenn ihre eigenen Werte (außer von vars
+  // überschriebenen Texten) im Entwurf stehen – Farbe muss in jedem Fall passen.
+  const brand = db.listBrands().find(b => {
+    const bv = b.vars || {};
+    if (!bv.brand_color || bv.brand_color !== vars.brand_color) return false;
+    return Object.entries(bv).filter(([k]) => k.startsWith('brand_')).every(([k, v]) => vars[k] === v);
+  }) || null;
+  return {
+    header: t(draft.header_template_id),
+    footer: t(draft.footer_template_id),
+    brand: brand ? { id: brand.id, name: brand.name } : (vars.brand_color ? { name: '(eigene Farben)' } : null),
+    hinweis: 'html enthält nur den Inhalt – Header, Footer und Marke setzt der Server drumherum. Nicht selbst ins HTML schreiben.',
+  };
+}
+
+/**
+ * Marken-Variablen unter die eigenen legen: brand_id gewählt → diese Marke,
+ * brand_id null → keine, weggelassen → Standardmarke. Eigene vars gewinnen.
+ */
+function withBrandVars(vars, brandId) {
+  let brand = null;
+  if (brandId === null) brand = null;
+  else if (brandId !== undefined) {
+    brand = db.getBrand(brandId);
+    if (!brand) throw new Error(`Marke ${brandId} nicht gefunden – list_brands aufrufen`);
+  } else brand = db.getDefaultBrand();
+  // Immer ein Objekt zurückgeben: bei null/undefined würde db.createDraft selbst
+  // die Standardmarke einsetzen – und brand_id=null („keine Marke") wäre wirkungslos.
+  return { ...db.brandVars(brand), ...(vars || {}) };
+}
+
+const headerFooterShape = {
+  header_template_id: z.number().int().nullable().optional()
+    .describe('Header-Vorlage (kind=header). Weglassen = Standard des Absenders, null = ohne Header'),
+  footer_template_id: z.number().int().nullable().optional()
+    .describe('Footer-Vorlage (kind=footer). Weglassen = Standard des Absenders, null = ohne Footer'),
+  brand_id: z.number().int().nullable().optional()
+    .describe('Marke (Farben, Logo, Firmendaten) aus list_brands. Weglassen = Standardmarke, null = keine'),
+};
+
 const recipientSchema = z.object({
   email: z.string().email(),
   name: z.string().optional(),
@@ -248,28 +297,30 @@ tool(
 
 tool(
   'create_draft',
-  'Legt einen HTML-Mail-Entwurf an. Er wird NICHT gesendet — der Nutzer prüft die Vorschau in der Web-UI und klickt auf Senden. ' +
-  'HTML unterstützt Platzhalter {{name}} und {{email}}, die pro Empfänger ersetzt werden. mode "batch" = pro Empfänger eine eigene, personalisierte Mail; "single" = eine gemeinsame Mail.',
+  'Legt einen HTML-Mail-Entwurf an. Er wird NICHT gesendet — der Nutzer prüft die Vorschau in der Web-UI und klickt auf Senden. '
+  + 'html ist NUR der Inhalt: Header, Footer und Marke (Farben/Logo) hängt der Server automatisch an – Standard des Absenders bzw. '
+  + 'Standardmarke, überschreibbar mit header_template_id/footer_template_id/brand_id (null = ohne). Die Antwort nennt unter '
+  + '"bausteine", was dran ist. Platzhalter {{name}}, {{email}}, {{firma}} … werden pro Empfänger ersetzt. '
+  + 'mode "batch" = pro Empfänger eine eigene Mail; "single" = eine gemeinsame Mail.',
   {
     account_id: z.number().int().describe('SMTP-Account-ID aus list_smtp_accounts'),
     subject: z.string(),
-    html: z.string().describe('HTML-Body, darf {{name}}/{{email}} enthalten'),
+    html: z.string().describe('Nur der Inhalt (ohne Header/Footer), darf {{name}}/{{email}} enthalten'),
     text: z.string().optional().describe('Optionaler Plaintext-Fallback (sonst automatisch aus HTML)'),
     mode: z.enum(['batch', 'single']).optional().default('batch'),
     reply_to: z.string().email().optional().describe('Optionale Reply-To-Adresse (sonst Account-Standard)'),
-    header_template_id: z.number().int().optional().describe('Header-Vorlage (kind=header), wird oben eingefügt'),
-    footer_template_id: z.number().int().optional().describe('Footer-Vorlage (kind=footer), wird unten eingefügt'),
-    vars: z.record(z.string()).optional().describe('Entwurfs-Variablen (gelten für die ganze Kampagne; Empfänger können überschreiben)'),
+    ...headerFooterShape,
+    vars: z.record(z.string()).optional().describe('Eigene Variablen (gewinnen gegen die Marke; Empfänger können überschreiben)'),
     recipients: z.array(recipientSchema).optional().default([]),
     attachments: z.array(attachmentSchema).optional().default([])
       .describe('Datei-Anhänge, z.B. [{"path":"~/Downloads/Bewerbung.pdf"}] – zusammen max. 20 MB'),
   },
-  async ({ attachments = [], ...a }) => {
-    const d = db.createDraft(a);
+  async ({ attachments = [], brand_id, vars, ...a }) => {
+    const d = db.createDraft({ ...a, vars: withBrandVars(vars, brand_id) });
     const files = attachAll(d.id, attachments);
     return ok({
       id: d.id, status: d.status, recipients: d.recipients.length,
-      attachments: files, open_in_ui: draftLink(d.id),
+      bausteine: bausteine(d), attachments: files, open_in_ui: draftLink(d.id),
       hint: 'Entwurf in der UI prüfen und senden.',
     });
   },
@@ -277,23 +328,40 @@ tool(
 
 tool(
   'update_draft',
-  'Aktualisiert Betreff/HTML/Text/Modus/Account eines Entwurfs.',
+  'Ändert einen Entwurf: Betreff, Inhalt, Modus, Absender, Header/Footer (null = entfernen), Marke (brand_id, null = keine), '
+  + 'Variablen, Öffnungs-Messung. Nur angegebene Felder ändern sich.',
   {
     id: z.number().int(),
     account_id: z.number().int().optional(),
     subject: z.string().optional(),
-    html: z.string().optional(),
+    html: z.string().optional().describe('Nur der Inhalt, ohne Header/Footer'),
     text: z.string().optional(),
     mode: z.enum(['batch', 'single']).optional(),
     reply_to: z.string().optional().describe('Reply-To-Adresse; leerer String = Account-Standard'),
-    vars: z.record(z.string()).optional().describe('Entwurfs-Variablen (Kampagnen-Ebene)'),
+    header_template_id: z.number().int().nullable().optional().describe('Header-Vorlage; null = ohne Header'),
+    footer_template_id: z.number().int().nullable().optional().describe('Footer-Vorlage; null = ohne Footer'),
+    brand_id: z.number().int().nullable().optional().describe('Marke wechseln; null = Marken-Farben entfernen'),
+    vars: z.record(z.string()).optional().describe('Entwurfs-Variablen (werden mit den bestehenden gemischt)'),
     track_opens: z.boolean().nullable().optional()
       .describe('Öffnungen dieser Mail messen; null = globale Einstellung übernehmen'),
   },
-  async ({ id, ...patch }) => {
+  async ({ id, brand_id, vars, ...patch }) => {
+    const cur = db.getDraft(id);
+    if (!cur) throw new Error('Entwurf nicht gefunden');
+    if (brand_id !== undefined || vars !== undefined) {
+      let curVars = {};
+      try { curVars = cur.vars ? JSON.parse(cur.vars) : {}; } catch { /* egal */ }
+      if (brand_id !== undefined) {
+        // Alte Markenwerte raus, neue rein – eigene (Nicht-Marken-)Variablen bleiben.
+        const old = db.listBrands().flatMap(b => Object.keys(db.brandVars(b)));
+        const own = Object.fromEntries(Object.entries(curVars).filter(([k]) => !old.includes(k) && !k.startsWith('brand_')));
+        patch.vars = withBrandVars({ ...own, ...(vars || {}) }, brand_id);
+      } else {
+        patch.vars = { ...curVars, ...vars };
+      }
+    }
     const d = db.updateDraft(id, patch);
-    if (!d) throw new Error('Entwurf nicht gefunden');
-    return ok({ id: d.id, status: d.status, open_in_ui: draftLink(d.id) });
+    return ok({ id: d.id, status: d.status, bausteine: bausteine(d), open_in_ui: draftLink(d.id) });
   },
 );
 
@@ -419,7 +487,8 @@ tool(
 // ---- E-Mail-Vorlagen ------------------------------------------------------
 tool(
   'list_templates',
-  'Gespeicherte E-Mail-Vorlagen – nur id, Name, Art und Betreff. Den HTML-Inhalt liefert get_template.',
+  'Vorlagen – nur id, Name, Art, Betreff. kind="header"/"footer" sind Bausteine für header_template_id/footer_template_id, '
+  + '"full"/"body" ganze Mails (create_draft_from_template). Den HTML-Inhalt liefert get_template.',
   { kind: z.enum(['full', 'header', 'body', 'footer']).optional() },
   async ({ kind }) => ok(db.listTemplates(kind).map(t => ({ id: t.id, name: t.name, kind: t.kind, subject: t.subject || undefined }))),
 );
@@ -463,7 +532,17 @@ tool('delete_custom_field', 'Löscht ein globales Custom-Feld.', { id: z.number(
   async ({ id }) => ok({ deleted: db.deleteCustomField(id) }));
 
 // ---- Marken (Brands) ------------------------------------------------------
-tool('list_brands', 'Marken (Variablen-Presets inkl. Farb-Palette) – z.B. Erohub, DBFV NRW. Feld palette = aufgelöste Farben (brand_color, brand_color_2, brand_accent, brand_bg, brand_surface, brand_text, brand_muted, brand_border + abgeleitet brand_on_color, brand_on_color_2, brand_on_accent, brand_soft, brand_gradient).', {}, async () => ok(db.listBrands()));
+tool(
+  'list_brands',
+  'Marken (Farben, Logo, Firmendaten), z.B. Erohub, DBFV NRW – kompakt: id, Name, Standard, Hauptfarbe, Variablen-Namen. '
+  + 'Zum Anwenden brand_id bei create_draft/update_draft. full=true liefert alle Werte inkl. Palette.',
+  { full: z.boolean().optional().default(false) },
+  async ({ full }) => ok(full ? db.listBrands() : db.listBrands().map(b => ({
+    id: b.id, name: b.name, is_default: !!b.is_default || undefined,
+    color: b.vars?.brand_color, firma: b.vars?.firma, logo: !!b.asset_id || undefined,
+    vars: Object.keys(b.vars || {}).filter(k => !k.startsWith('brand_')),
+  }))),
+);
 tool(
   'set_brand',
   'Legt eine Marke an bzw. aktualisiert sie. vars = Preset von Platzhaltern (firma, website, ansprechpartner …) plus Farb-Palette: brand_color (Primär), brand_color_2 (Sekundär), brand_accent, brand_bg, brand_surface, brand_text, brand_muted, brand_border. Nicht gesetzte Farb-Slots werden automatisch aus brand_color abgeleitet, ebenso brand_on_color/brand_on_color_2/brand_on_accent (lesbare Schriftfarbe), brand_soft und brand_gradient. asset_id optional = Logo aus der Medien-Bibliothek (wird beim Versand CID-eingebettet). is_default=true → neue Entwürfe erben diese Marke.',
@@ -543,21 +622,24 @@ tool(
 );
 tool(
   'create_draft_from_template',
-  'Erstellt einen Entwurf aus einer Vorlage (Betreff/HTML werden übernommen). Sendet NICHT.',
+  'Erstellt einen Entwurf aus einer Vorlage (Betreff/HTML werden übernommen). Header/Footer/Marke wie bei create_draft '
+  + '(weglassen = Standard, null = ohne). Sendet NICHT.',
   {
     template_id: z.number().int(),
     account_id: z.number().int(),
     recipients: z.array(recipientSchema).optional().default([]),
     mode: z.enum(['batch', 'single']).optional().default('batch'),
+    ...headerFooterShape,
+    vars: z.record(z.string()).optional(),
     attachments: z.array(attachmentSchema).optional().default([])
       .describe('Datei-Anhänge, z.B. [{"path":"~/Downloads/Angebot.pdf"}] – zusammen max. 20 MB'),
   },
-  async ({ template_id, account_id, recipients, mode, attachments = [] }) => {
+  async ({ template_id, attachments = [], brand_id, vars, ...a }) => {
     const t = db.getTemplate(template_id);
     if (!t) throw new Error('Vorlage nicht gefunden');
-    const d = db.createDraft({ account_id, subject: t.subject, html: t.html, mode, recipients });
+    const d = db.createDraft({ ...a, subject: t.subject, html: t.html, vars: withBrandVars(vars, brand_id) });
     const files = attachAll(d.id, attachments);
-    return ok({ id: d.id, from_template: t.name, attachments: files, open_in_ui: draftLink(d.id) });
+    return ok({ id: d.id, from_template: t.name, bausteine: bausteine(d), attachments: files, open_in_ui: draftLink(d.id) });
   },
 );
 

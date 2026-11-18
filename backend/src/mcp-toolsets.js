@@ -28,10 +28,14 @@ export const TOOLSETS = {
 };
 
 const DESIGN = new Set([
-  'get_template', 'create_template', 'update_template', 'delete_template',
-  'list_custom_fields', 'set_custom_field', 'delete_custom_field',
-  'list_brands', 'set_brand', 'apply_brand_to_draft', 'set_default_brand', 'delete_brand',
+  'create_template', 'update_template', 'delete_template',
+  'set_custom_field', 'delete_custom_field',
+  'set_brand', 'set_default_brand', 'delete_brand',
   'list_assets', 'add_asset', 'delete_asset',
+]);
+// Lesen und Anwenden von Vorlagen/Marken braucht man beim Mail-Schreiben UND beim Gestalten.
+const MAIL_AND_DESIGN = new Set([
+  'list_templates', 'get_template', 'list_brands', 'apply_brand_to_draft', 'list_custom_fields',
 ]);
 
 // Werkzeuge, die jeder Kanal zum Schreiben braucht – stecken in mail und whatsapp.
@@ -64,6 +68,7 @@ export function toolsetsOf(name) {
   if (ADMIN.has(name)) return ['admin'];
   if (CONTACTS.has(name)) return ['contacts'];
   if (DESIGN.has(name)) return ['design'];
+  if (MAIL_AND_DESIGN.has(name)) return ['mail', 'design'];
   // Mail ist der Rest: Entwürfe, Empfänger, Vorlagen, Marken, Assets, Posteingang …
   // Kontoliste braucht der Mail-Client trotzdem, um eine account_id zu wählen.
   return ['mail'];
