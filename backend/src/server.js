@@ -24,6 +24,7 @@ import { fetchInbox, verifyImap, listMailboxes } from './imap.js';
 import { createReplyDraft } from './reply.js';
 import * as gh from './github.js';
 import * as wa from './whatsapp.js';
+import { autoSyncConfig, runAutoSync, startAutoSync } from './mail-sync.js';
 import { subscribe, ping as waPing, closeAllStreams, emit as waEmit } from './wa-bus.js';
 import { ROOT_DIR, STATIC_DIR, DATA_DIR } from './paths.js';
 import * as backup from './backup.js';
@@ -575,6 +576,19 @@ app.post('/api/accounts/:id/inbox/sync', wrap(async (req, res) => {
   const folder = String(req.body?.folder || 'INBOX');
   const result = await fetchInbox(account, { folder, limit: +req.body?.limit || 50 });
   res.json(result);
+}));
+// Automatischer Abruf aller Ordner (siehe mail-sync.js): Status, Einstellung, sofort starten.
+app.get('/api/mail-sync', wrap((req, res) => res.json(autoSyncConfig())));
+app.put('/api/mail-sync', requireAdmin, wrap((req, res) => {
+  const patch = {};
+  if (req.body?.per_day !== undefined) patch.mail_autosync_per_day = Math.max(0, Math.min(48, Number(req.body.per_day) || 0));
+  if (req.body?.scope !== undefined) patch.mail_autosync_scope = req.body.scope === 'known' ? 'known' : 'all';
+  db.setSettings(patch);
+  res.json(autoSyncConfig());
+}));
+app.post('/api/mail-sync/run', requireAdmin, wrap(async (req, res) => {
+  const last = await runAutoSync({ reason: 'von Hand' });
+  res.json({ ...autoSyncConfig(), last });
 }));
 app.get('/api/accounts/:id/mailboxes', wrap(async (req, res) => {
   const account = db.getAccount(+req.params.id);
@@ -1525,6 +1539,8 @@ setInterval(() => { try { auth.purgeExpired(); } catch { /* egal */ } }, 3600_00
 wa.autostart().catch(e => console.error('[whatsapp] Autostart:', e.message));
 wa.startMediaCleanup();
 wa.startTranscriptionBacklog();
+// Alle Mail-Ordner regelmäßig abrufen (Standard 4× am Tag, in den Einstellungen änderbar).
+startAutoSync();
 // Hält den Stream und Zwischenstationen wach.
 setInterval(waPing, 25000).unref();
 

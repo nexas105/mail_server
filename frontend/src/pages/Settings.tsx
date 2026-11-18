@@ -7,6 +7,7 @@ import { Icon } from '../components/Icon';
 import { TrackingCard } from '../components/TrackingCard';
 import { McpTokensCard, McpLogCard } from '../components/McpAccessCard';
 import { BackupCard } from '../components/BackupCard';
+import { MailSyncCard } from '../components/MailSyncCard';
 
 import type {Account, WaAccount } from '../lib/types';
 import { StatusBadge } from '../components/WaStatus';
@@ -47,6 +48,7 @@ export function Settings() {
           <>
             <div className="settings-section">E-Mail</div>
             <DefaultAccountCard />
+            <MailSyncCard />
             <TrackingCard />
           </>
         ) : (
