@@ -48,7 +48,8 @@ function buildInstructions(selected) {
   if (has('mail')) {
     lines.push('Mail: create_draft/reply_to_message legen nur Entwürfe an, der Nutzer sendet in der UI. '
       + 'send_draft nur auf ausdrücklichen Wunsch. Mails finden: search_messages (gefiltert) statt list_inbox; '
-      + 'get_message liefert standardmäßig nur Text (format="html" für HTML).');
+      + 'get_message liefert standardmäßig nur Text (format="html" für HTML). '
+      + 'Antworten: erst get_thread (Verlauf), dann reply_to_message – das legt einen Entwurf im Gesprächsfaden an.');
   }
   if (has('whatsapp')) {
     lines.push('WhatsApp: list_wa_chats → list_wa_messages(chat_id). send_wa_* SENDET SOFORT ohne Vorschau – '
@@ -869,6 +870,56 @@ tool(
     return ok(m);
   },
 );
+/** Zitierte Vorgänger abschneiden – im Verlauf stehen die ohnehin einzeln. */
+const stripQuoted = s => {
+  const lines = String(s || '').split('\n');
+  const out = [];
+  for (const line of lines) {
+    if (/^\s*(Am .{5,120}schrieb.*:|On .{5,160}wrote:|-{2,}\s*(Original|Ursprüngliche) (Message|Nachricht)|Von: .+@)/i.test(line)) break;
+    if (/^\s*>/.test(line)) continue;
+    out.push(line);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+};
+
+tool(
+  'get_thread',
+  'Gesprächsverlauf zu einer Mail: alle zusammenhängenden Mails (über Message-ID/References, '
+  + 'alle lokal gespeicherten Ordner – eigene Antworten erscheinen, wenn "Sent" synchronisiert ist '
+  + 'oder sie aus dieser App gesendet wurden), älteste zuerst, Zitate entfernt. VOR reply_to_message '
+  + 'aufrufen, um den Zusammenhang zu kennen.',
+  {
+    message_id: z.number().int().describe('id einer beliebigen Mail des Fadens (aus list_inbox/search_messages)'),
+    max_chars_per_mail: z.number().int().optional().default(2000),
+    max_mails: z.number().int().optional().default(20),
+  },
+  async ({ message_id, max_chars_per_mail, max_mails }) => {
+    const t = db.getThread(message_id, { max: max_mails });
+    if (!t) return ok({ error: 'Mail nicht gefunden' });
+    const cut = s => (s.length > max_chars_per_mail ? `${s.slice(0, max_chars_per_mail)} …[gekürzt]` : s);
+    const items = t.mails.map(m => ({
+      id: m.id, folder: m.folder, date: m.date,
+      from: m.from_name ? `${m.from_name} <${m.from_email}>` : m.from_email,
+      to: m.to_text, cc: m.cc_text || undefined, subject: m.subject,
+      text: cut(stripQuoted(m.text || htmlToPlain(m.html || ''))),
+    }));
+    for (const d of t.sentReplies) {
+      items.push({
+        draft_id: d.id, folder: '(aus der App gesendet)', date: d.sent_at, from: 'ich', subject: d.subject,
+        text: cut(stripQuoted(d.text || htmlToPlain(d.html || ''))),
+      });
+    }
+    items.sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+    const folders = db.listMessageFolders(t.start.account_id).map(f => f.folder);
+    return ok({
+      count: items.length,
+      messages: items,
+      hint: folders.some(f => /sent|gesendet/i.test(f)) ? undefined
+        : 'Gesendet-Ordner ist nicht synchronisiert – eigene Antworten aus anderen Mailprogrammen fehlen. sync_inbox mit folder="Sent" (Name per list_mailboxes) holt sie.',
+    });
+  },
+);
+
 tool(
   'list_message_attachments',
   'Echte Datei-Anhänge einer empfangenen Mail (PDF, Office, Bilder …) – ohne reine Signatur-/Deko-Bilder, '
@@ -1781,6 +1832,7 @@ tool(
   'Antwortet auf eine empfangene Mail – als ECHTE Antwort: Betreff mit Re:, Zieladresse aus '
   + 'Reply-To bzw. Absender, Originaltext als Zitat und vor allem die Kopfzeilen In-Reply-To und '
   + 'References, damit die Antwort beim Empfänger im selben Gesprächsfaden hängt. '
+  + 'Vorher get_thread lesen, um den bisherigen Verlauf zu kennen. '
   + 'Standardmäßig entsteht nur ein Entwurf, den der Nutzer in der Oberfläche prüft und abschickt. '
   + 'Mit send=true geht die Antwort sofort raus (derselbe Vorflug-Check wie send_draft); das '
   + 'Original wird dann als beantwortet markiert und eine Kopie landet im Ordner „Gesendet".',

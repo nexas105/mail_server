@@ -1201,6 +1201,63 @@ export function setMessageFlagged(id, flagged = true) {
 export function setMessageAnswered(id, answered = true) {
   return db.prepare('UPDATE messages SET answered=? WHERE id=?').run(answered ? 1 : 0, id).changes > 0;
 }
+/**
+ * Gesprächsverlauf zu einer Mail: alle lokal gespeicherten Mails (jeder Ordner,
+ * also auch „Gesendet", wenn synchronisiert), die über Message-ID/References
+ * zusammenhängen, plus die aus dieser App gesendeten Antworten (Entwürfe mit
+ * in_reply_to). Älteste zuerst.
+ */
+export function getThread(messageId, { max = 50 } = {}) {
+  const start = getMessage(messageId);
+  if (!start) return null;
+  const ids = new Set();
+  const addRefs = s => { for (const r of String(s || '').match(/<[^>]+>/g) || []) ids.add(r); };
+  const bracketId = v => (v ? (String(v).startsWith('<') ? String(v) : `<${v}>`) : null);
+  if (start.message_id) ids.add(bracketId(start.message_id));
+  addRefs(start.refs);
+
+  const found = new Map([[start.id, start]]);
+  // Faden in beide Richtungen aufspannen: Vorgänger stehen in refs, Nachfolger
+  // tragen unsere ID in ihren refs. Drei Runden reichen für jeden echten Faden.
+  for (let round = 0; round < 3 && ids.size; round++) {
+    const list = [...ids].slice(0, 100);
+    const bare = list.map(r => r.slice(1, -1));
+    const rows = db.prepare(`SELECT * FROM messages WHERE account_id = ? AND (
+        message_id IN (${list.map(() => '?').join(',')}) OR message_id IN (${bare.map(() => '?').join(',')})
+        OR ${list.map(() => 'refs LIKE ?').join(' OR ')})`)
+      .all(start.account_id, ...list, ...bare, ...list.map(r => `%${r}%`));
+    let grew = false;
+    for (const r of rows) {
+      if (found.has(r.id)) continue;
+      found.set(r.id, r);
+      grew = true;
+      const before = ids.size;
+      if (r.message_id) ids.add(bracketId(r.message_id));
+      addRefs(r.refs);
+      if (ids.size !== before) grew = true;
+    }
+    if (!grew) break;
+  }
+
+  const list = [...ids];
+  const sentReplies = list.length ? db.prepare(`SELECT id, subject, html, text, sent_at, in_reply_to FROM drafts
+      WHERE status IN ('sent','partial') AND in_reply_to IN (${list.map(() => '?').join(',')})`).all(...list) : [];
+
+  const seenIds = new Set();
+  const mails = [...found.values()].filter(m => {
+    // Dieselbe Mail kann in mehreren Ordnern liegen (INBOX + Archiv) – einmal reicht.
+    const key = m.message_id || `id:${m.id}`;
+    if (seenIds.has(key)) return false;
+    seenIds.add(key);
+    return true;
+  });
+  // Aus der App gesendete Antworten, die per Sent-Sync schon als Mail da sind, nicht doppelt.
+  return {
+    start,
+    mails: mails.sort((a, b) => String(a.date || a.created_at).localeCompare(String(b.date || b.created_at))).slice(-max),
+    sentReplies,
+  };
+}
 export function deleteMessage(id) {
   return db.prepare('DELETE FROM messages WHERE id=?').run(id).changes > 0;
 }

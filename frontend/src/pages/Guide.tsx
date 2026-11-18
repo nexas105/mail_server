@@ -65,7 +65,7 @@ const GROUPS: { title: string; icon: IconName; note: string; names: string[] }[]
     title: 'Posteingang & Protokoll', icon: 'inbox',
     note: 'Empfangenes lesen, im Gesprächsfaden antworten und nachsehen, was wann rausging.',
     names: ['sync_inbox', 'list_inbox', 'list_message_folders', 'get_message', 'reply_to_message',
-      'set_message_flags', 'delete_message', 'list_mailboxes', 'create_mailbox', 'move_messages',
+      'get_thread', 'search_messages', 'set_message_flags', 'delete_message', 'list_mailboxes', 'create_mailbox', 'move_messages',
       'list_send_events'],
   },
   {
