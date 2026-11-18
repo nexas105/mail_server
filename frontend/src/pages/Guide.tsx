@@ -85,9 +85,10 @@ const GROUPS: { title: string; icon: IconName; note: string; names: string[] }[]
   },
   {
     title: 'Brain', icon: 'brain',
-    note: 'Markdown-Wissen, allgemein und je Projekt – liest und pflegt die KI selbst.',
-    names: ['get_brain_overview', 'list_brain_files', 'read_brain_file', 'search_brain', 'write_brain_file',
-      'edit_brain_file', 'create_brain_project', 'move_brain_file', 'delete_brain_file'],
+    note: 'Notizen und Dateien (PDF, Bilder …), allgemein und je Projekt – liest und pflegt die KI selbst.',
+    names: ['get_brain_overview', 'get_brain_context', 'list_brain_files', 'read_brain_file', 'search_brain',
+      'write_brain_file', 'edit_brain_file', 'add_brain_file', 'save_to_brain', 'create_brain_project',
+      'create_brain_folder', 'move_brain_file', 'delete_brain_file'],
   },
   {
     title: 'WhatsApp', icon: 'chat',
@@ -284,7 +285,7 @@ MAIL_WA_MCP_SEND=1                                # erst damit darf die KI Whats
           Jedes Werkzeug kostet den KI-Client Kontext – alle zusammen rund 22.000 Token, bevor
           überhaupt etwas passiert. Darum lässt sich der Server in Sets aufteilen:
           {' '}<code>mail</code> (~9.000), <code>whatsapp</code> (~4.500), <code>contacts</code>,
-          {' '}<code>brain</code> (~1.600), <code>design</code> (Vorlagen, Marken, Bilder), <code>github</code>, <code>admin</code>.
+          {' '}<code>brain</code> (~2.800), <code>design</code> (Vorlagen, Marken, Bilder), <code>github</code>, <code>admin</code>.
           Das Schreib-Briefing steckt in Mail und WhatsApp.
         </p>
         <h2 style={{ marginTop: 12 }}>Über HTTP – eigener Pfad je Set</h2>

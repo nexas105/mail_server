@@ -71,6 +71,8 @@ export function toolsetsOf(name) {
 
 // Lesende Konto-Infos braucht man beim Schreiben einer Mail – zusätzlich in mail.
 const ALSO_IN_MAIL = new Set(['list_smtp_accounts', 'list_contacts', 'list_lists']);
+// Datei-Upload brauchen Mail (Anhänge) und Brain (Ablage).
+const ALSO_IN_BRAIN = new Set(['create_upload']);
 
 /**
  * Liest eine Set-Angabe („mail", „mail+contacts", „all", leer) und gibt
@@ -93,5 +95,6 @@ export function parseToolsets(spec) {
 export function inToolsets(name, selected) {
   if (!selected) return true;
   if (selected.has('mail') && ALSO_IN_MAIL.has(name)) return true;
+  if (selected.has('brain') && ALSO_IN_BRAIN.has(name)) return true;
   return toolsetsOf(name).some(s => selected.has(s));
 }

@@ -578,23 +578,47 @@ app.post('/api/accounts/:id/inbox/sync', wrap(async (req, res) => {
   const result = await fetchInbox(account, { folder, limit: +req.body?.limit || 50 });
   res.json(result);
 }));
-// ---- Brain: Markdown-Notizen (siehe brain.js) ----------------------------
-// Fehler aus brain.js sind Eingabefehler (Pfad, Konflikt) → 400 mit Meldung.
+// ---- Brain: Notizen und Dateien (siehe brain.js) ------------------------
+// Fehler aus brain.js sind Eingabefehler (Pfad, Konflikt) → 4xx mit Meldung.
 const brainCall = fn => wrap(async (req, res) => {
   try { res.json(await fn(req)); }
   catch (e) { res.status(/nicht gefunden/.test(e.message) ? 404 : (/geändert/.test(e.message) ? 409 : 400)).json({ error: e.message }); }
 });
 app.get('/api/brain', brainCall(() => brain.overview()));
-app.get('/api/brain/files', brainCall(req => brain.listFiles(req.query.path || '')));
-app.get('/api/brain/search', brainCall(req => brain.search(req.query.q, { dir: req.query.path || '' })));
-app.get('/api/brain/file', brainCall(req => brain.readFile(req.query.path)));
+app.get('/api/brain/tree', brainCall(() => brain.tree()));
+app.get('/api/brain/files', brainCall(req => brain.listFiles(req.query.path || '', { kind: req.query.kind || null, tag: req.query.tag || null })));
+app.get('/api/brain/search', brainCall(req => brain.search(req.query.q || '', { dir: req.query.path || '', tag: req.query.tag || null })));
+app.get('/api/brain/file', brainCall(req => brain.readFile(req.query.path, {
+  pages: req.query.from ? [Number(req.query.from), Number(req.query.to || req.query.from)] : null,
+})));
 app.put('/api/brain/file', brainCall(req => brain.writeFile(req.body?.path, req.body?.content ?? '', {
   ifMatch: req.body?.if_match || null, createOnly: !!req.body?.create_only,
 })));
-app.post('/api/brain/move', brainCall(req => brain.moveFile(req.body?.from, req.body?.to)));
-app.delete('/api/brain/file', brainCall(req => brain.deleteEntry(req.query.path)));
+app.post('/api/brain/move', brainCall(req => brain.moveEntry(req.body?.from, req.body?.to)));
+app.delete('/api/brain/file', brainCall(req => brain.deleteEntry(req.query.path, { folder: req.query.folder === '1' })));
+app.post('/api/brain/folders', brainCall(req => brain.createFolder(req.body?.path)));
 app.post('/api/brain/projects', brainCall(req => brain.createProject(req.body?.name, { description: req.body?.description || '' })));
 app.delete('/api/brain/projects/:name', brainCall(req => brain.deleteEntry(req.params.name, { project: true })));
+
+// Datei hochladen: roher Body, Ordner und Name in der Query.
+app.post('/api/brain/upload', express.raw({ type: () => true, limit: '50mb' }), brainCall(req =>
+  brain.saveFile(req.query.folder, req.query.name, req.body, { mime: req.get('content-type') })));
+
+// Datei ausliefern (Bilder in Notizen, PDF-Ansicht, Download). Alles außer PDF
+// in einer Sandbox – ein SVG mit Skript soll beim direkten Aufruf nichts tun.
+app.get('/api/brain/raw', wrap((req, res) => {
+  let rel;
+  try { rel = brain.cleanPath(req.query.path); } catch (e) { return res.status(400).json({ error: e.message }); }
+  const abs = brain.absOf(rel);
+  if (!fs.existsSync(abs)) return res.status(404).json({ error: 'Datei nicht gefunden' });
+  res.set('Content-Type', brain.mimeOf(rel));
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('Cache-Control', 'private, max-age=60');
+  if (brain.typeOf(rel)?.kind !== 'pdf') res.set('Content-Security-Policy', "sandbox; default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; media-src 'self'");
+  const disp = req.query.download === '1' ? 'attachment' : 'inline';
+  res.set('Content-Disposition', `${disp}; filename*=UTF-8''${encodeURIComponent(path.basename(rel))}`);
+  fs.createReadStream(abs).pipe(res);
+}));
 
 // Automatischer Abruf aller Ordner (siehe mail-sync.js): Status, Einstellung, sofort starten.
 app.get('/api/mail-sync', wrap((req, res) => res.json(autoSyncConfig())));

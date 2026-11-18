@@ -398,7 +398,7 @@ Alle Werkzeuge zusammen belegen im KI-Client rund 22.000 Token Kontext, bevor
 | `design` | Vorlagen, Marken, Platzhalter-Felder, Bilder | 2.200 |
 | `github` | An Kontakten verknüpfte Repos | 1.800 |
 | `admin` | SMTP/IMAP-Konten, Einstellungen, Tracking | 1.800 |
-| `brain` | Markdown-Notizen, allgemein und je Projekt (siehe unten) | 1.600 |
+| `brain` | Notizen und Dateien (PDF, Bilder …), allgemein und je Projekt (siehe unten) | 2.800 |
 
 `get_writing_briefing` und der Kontakt-Kontext stecken in `mail` und
 `whatsapp`, `list_contacts`/`list_lists`/`list_smtp_accounts` zusätzlich in `mail`.
@@ -427,22 +427,32 @@ Typischer Ablauf: „Schreib eine HTML-Einladung an meine Liste 'Kunden'". Claud
 ruft `create_draft` und `add_recipients_from_list` auf und gibt dir den
 `open_in_ui`-Link; du prüfst die Vorschau und klickst **Senden**.
 
-### Brain: Markdown-Wissen für dich und die KI
+### Brain: Wissen und Dateien für dich und die KI
 
-Unter **Brain** (Seitenleiste) und über `/mcp/brain` liegen Notizen als echte
-`.md`-Dateien in `data/brain/`, im Backup enthalten:
+Unter **Brain** (Seitenleiste) und über `/mcp/brain` liegen Notizen und Dateien als
+echte Dateien in `data/brain/` – im Backup enthalten:
 
 ```
 data/brain/allgemein/…             gilt überall (Schreibstil, Abläufe, Personen)
-data/brain/projekte/<projekt>/…    je Projekt ein Ordner, README.md = Überblick
+data/brain/projekte/<projekt>/…    je Projekt ein Ordner: README.md (Vorlage), dateien/, freie Unterordner
 data/brain/.papierkorb/…           Gelöschtes, wiederherstellbar
+data/brain/.cache/…                aus PDFs gezogener Text (wird bei Bedarf neu erzeugt)
 ```
 
-Werkzeuge: `get_brain_overview`, `list_brain_files`, `read_brain_file` (auch
-Zeilenausschnitte), `search_brain`, `write_brain_file` (`replace`/`append`/`prepend`),
-`edit_brain_file` (gezielte Ersetzung), `create_brain_project`, `move_brain_file`,
-`delete_brain_file`. Gleichzeitige Änderungen in Oberfläche und KI fängt der
-`etag` ab (`if_match`); Pfade außerhalb von `allgemein/` und `projekte/` sind gesperrt.
+- **Dateien:** PDF, Bilder, Office, Text/CSV, Audio, Video (max. 50 MB) – per Drag & Drop,
+  Knopf oder ⌘V (Bilder direkt in eine Notiz). Kein HTML/JS; ausgeliefert wird nur mit Anmeldung.
+- **Die KI liest Dateien:** PDFs als Text je Seite, Bilder als Bild, alles durchsuchbar
+  (`search_brain` findet auch Text in PDFs).
+- **Struktur:** Kopf mit `tags`, `status`, `beschreibung`; `#tags` im Text; Verweise
+  `[[notiz]]` mit Rückverweisen; Bilder `![](dateien/bild.png)`. Verschieben zieht Verweise nach.
+- **Projekt-Kontext:** `get_brain_context` liefert README, alle Notizen mit Tag `kontext`
+  (auch allgemeine) und eine Dateiliste – ein Aufruf statt vieler.
+
+Werkzeuge: `get_brain_overview`, `get_brain_context`, `list_brain_files`, `read_brain_file`,
+`search_brain`, `write_brain_file`, `edit_brain_file`, `add_brain_file` (upload_id/url/base64),
+`save_to_brain` (Mail-Anhang oder WhatsApp-Datei übernehmen), `create_brain_project`,
+`create_brain_folder`, `move_brain_file`, `delete_brain_file` – plus `create_upload` für
+Dateien vom eigenen Rechner. Konflikte zwischen Oberfläche und KI fängt `etag`/`if_match` ab.
 
 ## HTTP-API: Mails direkt senden
 

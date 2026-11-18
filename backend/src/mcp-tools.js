@@ -57,9 +57,10 @@ function buildInstructions(selected) {
       + 'nur mit bestätigtem Empfänger und Wortlaut.');
   }
   if (has('brain')) {
-    lines.push('Brain: Markdown-Wissen des Nutzers (allgemein/… und projekte/<projekt>/…). Zu Beginn get_brain_overview, '
-      + 'dann gezielt read_brain_file/search_brain. Neue Erkenntnisse und Entscheidungen festhalten: edit_brain_file oder '
-      + 'write_brain_file mit mode="append"; etag als if_match mitgeben.');
+    lines.push('Brain: Wissen des Nutzers als Notizen und Dateien (allgemein/… und projekte/<projekt>/…). Zu Beginn '
+      + 'get_brain_overview, für ein Projekt get_brain_context; gezielt read_brain_file (liest auch PDFs und Bilder) und '
+      + 'search_brain. Neue Erkenntnisse und Entscheidungen festhalten (edit_brain_file oder write_brain_file mode="append", '
+      + 'etag als if_match). Dateien: add_brain_file, Mail-/WhatsApp-Anhänge: save_to_brain.');
   }
   if (selected) {
     const off = Object.keys(TOOLSETS).filter(s => !selected.has(s));
@@ -498,7 +499,7 @@ tool(
 tool(
   'create_upload',
   'Für Dateien vom eigenen Rechner, wenn dieser MCP-Server remote läuft: liefert eine einmalige Upload-URL (15 Min. gültig). '
-  + 'Datei hochladen mit: curl -sS -T <datei> <upload_url> – danach upload_id bei add_attachment oder create_draft (attachments) angeben. Spart die base64-Übertragung.',
+  + 'Datei hochladen mit: curl -sS -T <datei> <upload_url> – danach upload_id bei add_attachment, create_draft (attachments) oder add_brain_file angeben. Spart die base64-Übertragung.',
   {
     filename: z.string().describe('Dateiname beim Empfänger, z.B. "Angebot.pdf"'),
     mimetype: z.string().optional().describe('Standard: aus der Dateiendung abgeleitet'),
@@ -1568,7 +1569,7 @@ tool(
   // Kontakt-Kontext, Schreibstile, Vermeiden-Regeln – liegen in einer eigenen Datei.
   registerContextTools({ tool, ok, UI: LINK });
   // Brain: Markdown-Wissen (eigenes Set /mcp/brain).
-  registerBrainTools({ tool, ok, UI: LINK });
+  registerBrainTools({ tool, ok, UI: LINK, uploadOwner });
 
 // ===========================================================================
 // Vervollständigung: alles, was die Oberfläche kann, kann der KI-Client auch.
