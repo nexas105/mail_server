@@ -34,9 +34,9 @@ const ARCHIVE_VERSION = 1;
 
 /** Erlaubte Einträge auf oberster Ebene – alles andere wird beim Lesen abgewiesen. */
 const TOP_FILES = new Set(['manifest.json', 'mail.db', '.keyfile']);
-const TOP_DIRS = new Set(['attachments', 'assets', 'whatsapp']);
+const TOP_DIRS = new Set(['attachments', 'assets', 'whatsapp', 'brain']);
 /** Was beim Tausch bewegt wird (bestehender Inhalt → restore-prev-*). */
-const SWAP_ENTRIES = ['mail.db', 'mail.db-wal', 'mail.db-shm', '.keyfile', 'attachments', 'assets', 'whatsapp'];
+const SWAP_ENTRIES = ['mail.db', 'mail.db-wal', 'mail.db-shm', '.keyfile', 'attachments', 'assets', 'whatsapp', 'brain'];
 
 const log = (...a) => console.error('[backup]', ...a);
 

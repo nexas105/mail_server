@@ -84,6 +84,12 @@ const GROUPS: { title: string; icon: IconName; note: string; names: string[] }[]
       'set_contact_notes', 'set_contact_style'],
   },
   {
+    title: 'Brain', icon: 'brain',
+    note: 'Markdown-Wissen, allgemein und je Projekt – liest und pflegt die KI selbst.',
+    names: ['get_brain_overview', 'list_brain_files', 'read_brain_file', 'search_brain', 'write_brain_file',
+      'edit_brain_file', 'create_brain_project', 'move_brain_file', 'delete_brain_file'],
+  },
+  {
     title: 'WhatsApp', icon: 'chat',
     note: 'Lesen geht immer; senden nur mit doppelter Freigabe — siehe „Was die KI darf".',
     names: ['list_wa_accounts', 'list_wa_chats', 'get_wa_chat', 'list_wa_messages', 'get_wa_message',
@@ -158,6 +164,7 @@ export MCP_TOKEN=$(openssl rand -hex 32)`;
   const toolsetsHttp = `https://mcp.example.de/mcp            # alle Werkzeuge
 https://mcp.example.de/mcp/mail       # nur E-Mail
 https://mcp.example.de/mcp/whatsapp   # nur WhatsApp
+https://mcp.example.de/mcp/brain      # nur Brain (Notizen)
 https://mcp.example.de/mcp/mail+contacts   # kombinierbar`;
 
   const toolsetsLocal = `claude mcp add mail -- "${node}" "${mcp}" --toolset=mail
@@ -277,7 +284,7 @@ MAIL_WA_MCP_SEND=1                                # erst damit darf die KI Whats
           Jedes Werkzeug kostet den KI-Client Kontext – alle zusammen rund 22.000 Token, bevor
           überhaupt etwas passiert. Darum lässt sich der Server in Sets aufteilen:
           {' '}<code>mail</code> (~9.000), <code>whatsapp</code> (~4.500), <code>contacts</code>,
-          {' '}<code>design</code> (Vorlagen, Marken, Bilder), <code>github</code>, <code>admin</code>.
+          {' '}<code>brain</code> (~1.600), <code>design</code> (Vorlagen, Marken, Bilder), <code>github</code>, <code>admin</code>.
           Das Schreib-Briefing steckt in Mail und WhatsApp.
         </p>
         <h2 style={{ marginTop: 12 }}>Über HTTP – eigener Pfad je Set</h2>

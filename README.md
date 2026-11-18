@@ -398,6 +398,7 @@ Alle Werkzeuge zusammen belegen im KI-Client rund 22.000 Token Kontext, bevor
 | `design` | Vorlagen, Marken, Platzhalter-Felder, Bilder | 2.200 |
 | `github` | An Kontakten verknüpfte Repos | 1.800 |
 | `admin` | SMTP/IMAP-Konten, Einstellungen, Tracking | 1.800 |
+| `brain` | Markdown-Notizen, allgemein und je Projekt (siehe unten) | 1.600 |
 
 `get_writing_briefing` und der Kontakt-Kontext stecken in `mail` und
 `whatsapp`, `list_contacts`/`list_lists`/`list_smtp_accounts` zusätzlich in `mail`.
@@ -406,6 +407,7 @@ Alle Werkzeuge zusammen belegen im KI-Client rund 22.000 Token Kontext, bevor
 # HTTP: eigener Pfad je Set, mit + kombinierbar
 https://mcp.example.com/mcp/mail
 https://mcp.example.com/mcp/whatsapp
+https://mcp.example.com/mcp/brain
 https://mcp.example.com/mcp/mail+contacts
 https://mcp.example.com/mcp                 # alle, wie bisher
 
@@ -424,6 +426,23 @@ Auch die Antworten sind auf Kontext getrimmt: kompaktes JSON ohne `null`-Felder,
 Typischer Ablauf: „Schreib eine HTML-Einladung an meine Liste 'Kunden'". Claude
 ruft `create_draft` und `add_recipients_from_list` auf und gibt dir den
 `open_in_ui`-Link; du prüfst die Vorschau und klickst **Senden**.
+
+### Brain: Markdown-Wissen für dich und die KI
+
+Unter **Brain** (Seitenleiste) und über `/mcp/brain` liegen Notizen als echte
+`.md`-Dateien in `data/brain/`, im Backup enthalten:
+
+```
+data/brain/allgemein/…             gilt überall (Schreibstil, Abläufe, Personen)
+data/brain/projekte/<projekt>/…    je Projekt ein Ordner, README.md = Überblick
+data/brain/.papierkorb/…           Gelöschtes, wiederherstellbar
+```
+
+Werkzeuge: `get_brain_overview`, `list_brain_files`, `read_brain_file` (auch
+Zeilenausschnitte), `search_brain`, `write_brain_file` (`replace`/`append`/`prepend`),
+`edit_brain_file` (gezielte Ersetzung), `create_brain_project`, `move_brain_file`,
+`delete_brain_file`. Gleichzeitige Änderungen in Oberfläche und KI fängt der
+`etag` ab (`if_match`); Pfade außerhalb von `allgemein/` und `projekte/` sind gesperrt.
 
 ## HTTP-API: Mails direkt senden
 

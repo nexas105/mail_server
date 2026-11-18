@@ -14,6 +14,7 @@ import { getServiceToken } from './auth.js';
 import { trackingBaseUrl, trackingReachable } from './tracking.js';
 import { logMcpEvent, summarizeArgs } from './mcp-access.js';
 import { registerContextTools } from './mcp-context-tools.js';
+import { registerBrainTools } from './mcp-brain-tools.js';
 import { createUpload, takeUpload } from './mcp-uploads.js';
 
 /**
@@ -43,8 +44,8 @@ export function toolCatalog() {
  */
 function buildInstructions(selected) {
   const has = s => !selected || selected.has(s);
-  const lines = ['mail-server: E-Mail und WhatsApp des Nutzers. Antworten sind kompaktes JSON.'];
-  lines.push('Vor dem Verfassen einer Nachricht an eine Person: get_writing_briefing (Kontext, Stil, fehlende Angaben).');
+  const lines = ['mail-server: E-Mail, WhatsApp und Brain (Notizen) des Nutzers. Antworten sind kompaktes JSON.'];
+  if (has('mail') || has('whatsapp')) lines.push('Vor dem Verfassen einer Nachricht an eine Person: get_writing_briefing (Kontext, Stil, fehlende Angaben).');
   if (has('mail')) {
     lines.push('Mail: create_draft/reply_to_message legen nur Entwürfe an, der Nutzer sendet in der UI. '
       + 'send_draft nur auf ausdrücklichen Wunsch. Mails finden: search_messages (gefiltert) statt list_inbox; '
@@ -54,6 +55,11 @@ function buildInstructions(selected) {
   if (has('whatsapp')) {
     lines.push('WhatsApp: list_wa_chats → list_wa_messages(chat_id). send_wa_* SENDET SOFORT ohne Vorschau – '
       + 'nur mit bestätigtem Empfänger und Wortlaut.');
+  }
+  if (has('brain')) {
+    lines.push('Brain: Markdown-Wissen des Nutzers (allgemein/… und projekte/<projekt>/…). Zu Beginn get_brain_overview, '
+      + 'dann gezielt read_brain_file/search_brain. Neue Erkenntnisse und Entscheidungen festhalten: edit_brain_file oder '
+      + 'write_brain_file mit mode="append"; etag als if_match mitgeben.');
   }
   if (selected) {
     const off = Object.keys(TOOLSETS).filter(s => !selected.has(s));
@@ -1561,6 +1567,8 @@ tool(
 
   // Kontakt-Kontext, Schreibstile, Vermeiden-Regeln – liegen in einer eigenen Datei.
   registerContextTools({ tool, ok, UI: LINK });
+  // Brain: Markdown-Wissen (eigenes Set /mcp/brain).
+  registerBrainTools({ tool, ok, UI: LINK });
 
 // ===========================================================================
 // Vervollständigung: alles, was die Oberfläche kann, kann der KI-Client auch.

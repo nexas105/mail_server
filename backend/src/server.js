@@ -25,6 +25,7 @@ import { createReplyDraft } from './reply.js';
 import * as gh from './github.js';
 import * as wa from './whatsapp.js';
 import { autoSyncConfig, runAutoSync, startAutoSync } from './mail-sync.js';
+import * as brain from './brain.js';
 import { subscribe, ping as waPing, closeAllStreams, emit as waEmit } from './wa-bus.js';
 import { ROOT_DIR, STATIC_DIR, DATA_DIR } from './paths.js';
 import * as backup from './backup.js';
@@ -577,6 +578,24 @@ app.post('/api/accounts/:id/inbox/sync', wrap(async (req, res) => {
   const result = await fetchInbox(account, { folder, limit: +req.body?.limit || 50 });
   res.json(result);
 }));
+// ---- Brain: Markdown-Notizen (siehe brain.js) ----------------------------
+// Fehler aus brain.js sind Eingabefehler (Pfad, Konflikt) → 400 mit Meldung.
+const brainCall = fn => wrap(async (req, res) => {
+  try { res.json(await fn(req)); }
+  catch (e) { res.status(/nicht gefunden/.test(e.message) ? 404 : (/geändert/.test(e.message) ? 409 : 400)).json({ error: e.message }); }
+});
+app.get('/api/brain', brainCall(() => brain.overview()));
+app.get('/api/brain/files', brainCall(req => brain.listFiles(req.query.path || '')));
+app.get('/api/brain/search', brainCall(req => brain.search(req.query.q, { dir: req.query.path || '' })));
+app.get('/api/brain/file', brainCall(req => brain.readFile(req.query.path)));
+app.put('/api/brain/file', brainCall(req => brain.writeFile(req.body?.path, req.body?.content ?? '', {
+  ifMatch: req.body?.if_match || null, createOnly: !!req.body?.create_only,
+})));
+app.post('/api/brain/move', brainCall(req => brain.moveFile(req.body?.from, req.body?.to)));
+app.delete('/api/brain/file', brainCall(req => brain.deleteEntry(req.query.path)));
+app.post('/api/brain/projects', brainCall(req => brain.createProject(req.body?.name, { description: req.body?.description || '' })));
+app.delete('/api/brain/projects/:name', brainCall(req => brain.deleteEntry(req.params.name, { project: true })));
+
 // Automatischer Abruf aller Ordner (siehe mail-sync.js): Status, Einstellung, sofort starten.
 app.get('/api/mail-sync', wrap((req, res) => res.json(autoSyncConfig())));
 app.put('/api/mail-sync', requireAdmin, wrap((req, res) => {

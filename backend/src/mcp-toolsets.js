@@ -9,6 +9,7 @@
 //   HTTP   /mcp            → alle Sets (wie bisher)
 //          /mcp/mail      → nur Mail (+ Schreib-Briefing)
 //          /mcp/whatsapp  → nur WhatsApp (+ Schreib-Briefing)
+//          /mcp/brain     → nur Brain (Markdown-Notizen)
 //          /mcp/contacts, /mcp/design, /mcp/github, /mcp/admin
 //          /mcp/mail+contacts → mehrere Sets mit „+" (oder „,") verbinden
 //   stdio  --toolset=mail  oder  MCP_TOOLSETS=whatsapp,contacts
@@ -23,6 +24,7 @@ export const TOOLSETS = {
   github: 'GitHub-Repos, die an Kontakten hängen',
   design: 'Newsletter-Gestaltung: Vorlagen, Marken, Platzhalter-Felder, Bilder',
   admin: 'Konten (SMTP/IMAP), Einstellungen, Tracking',
+  brain: 'Brain: Markdown-Wissen, allgemein und je Projekt – lesen, schreiben, suchen',
 };
 
 const DESIGN = new Set([
@@ -55,6 +57,7 @@ const CONTACTS = new Set([
 
 /** In welchen Sets steckt ein Werkzeug? */
 export function toolsetsOf(name) {
+  if (name.includes('brain')) return ['brain'];
   if (WRITING_CORE.has(name)) return ['mail', 'whatsapp', 'contacts'];
   if (/(^|_)wa(_|$)/.test(name)) return ['whatsapp'];
   if (name.includes('repo')) return ['github'];
@@ -76,7 +79,7 @@ const ALSO_IN_MAIL = new Set(['list_smtp_accounts', 'list_contacts', 'list_lists
 export function parseToolsets(spec) {
   const raw = String(spec || '').toLowerCase().split(/[+,\s]+/).map(s => s.trim()).filter(Boolean);
   if (!raw.length || raw.includes('all')) return null;
-  const alias = { wa: 'whatsapp', email: 'mail', kontakte: 'contacts', gh: 'github', vorlagen: 'design', templates: 'design' };
+  const alias = { wa: 'whatsapp', email: 'mail', kontakte: 'contacts', gh: 'github', vorlagen: 'design', templates: 'design', notizen: 'brain', wissen: 'brain' };
   const out = new Set();
   for (const r of raw) {
     const n = alias[r] || r;

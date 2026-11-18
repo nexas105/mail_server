@@ -52,6 +52,7 @@ const general: NavItem[] = [
   // Das Adressbuch gehört zu beiden Kanälen – an einem Kontakt hängen
   // Mailadresse, WhatsApp-Nummer und verknüpfte Repos.
   { to: ROUTES.manage.contacts, icon: 'users', label: 'Kontakte' },
+  { to: ROUTES.brain, icon: 'brain', label: 'Brain' },
   { to: ROUTES.settings, icon: 'settings', label: 'Einstellungen' },
   { to: ROUTES.guide, icon: 'book', label: 'Anleitung' },
 ];

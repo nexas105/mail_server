@@ -21,6 +21,7 @@ export const ROUTES = {
     media: '/verwaltung/medien',
     accounts: '/verwaltung/konten',
   },
+  brain: '/brain',
   settings: '/einstellungen',
   guide: '/hilfe',
   profile: '/profil',

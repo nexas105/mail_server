@@ -17,6 +17,7 @@ import { Media } from './pages/Media';
 import { Brands } from './pages/Brands';
 import { Guide } from './pages/Guide';
 import { Settings } from './pages/Settings';
+import { Brain } from './pages/Brain';
 import { Profile } from './pages/Profile';
 import { WhatsApp } from './pages/WhatsApp';
 import { WhatsAppConnect } from './pages/WhatsAppConnect';
@@ -87,6 +88,7 @@ function Shell({ user, onSignedOut }: { user: AuthState['user']; onSignedOut: ()
           <Route path={ROUTES.whatsapp.contacts} element={<WhatsAppContacts />} />
           <Route path={ROUTES.whatsapp.scheduled} element={<WhatsAppScheduled />} />
           <Route path={ROUTES.profile} element={<Profile />} />
+          <Route path={ROUTES.brain} element={<Brain />} />
           <Route path={ROUTES.settings} element={<Settings />} />
           <Route path={ROUTES.guide} element={<Guide />} />
           <Route path="/draft/:id" element={<LegacyDraftRedirect />} />
