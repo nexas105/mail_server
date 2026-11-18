@@ -15,6 +15,7 @@ import './restore-boot.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createMcpServer } from './mcp-tools.js';
 import { configure, policy } from './mcp-policy.js';
+import { parseToolsets } from './mcp-toolsets.js';
 
 const wantsHttp = process.argv.includes('--http')
   || String(process.env.MCP_TRANSPORT || '').toLowerCase() === 'http';
@@ -28,7 +29,10 @@ if (wantsHttp) {
   await startHttpServer();
 } else {
   configure({ transport: 'stdio' });
-  const server = createMcpServer({ transport: 'stdio', tokenName: null });
+  // --toolset=mail | whatsapp | mail+contacts …  (oder MCP_TOOLSETS); ohne Angabe alle.
+  const arg = process.argv.find(a => a.startsWith('--toolset='))?.split('=')[1];
+  const toolsets = parseToolsets(arg ?? process.env.MCP_TOOLSETS);
+  const server = createMcpServer({ transport: 'stdio', tokenName: null, toolsets });
   await server.connect(new StdioServerTransport());
-  console.error(`mail-server MCP läuft (stdio)${policy.readonly ? ' · Nur-Lesen' : ''}.`);
+  console.error(`mail-server MCP läuft (stdio)${toolsets ? ` · Sets: ${[...toolsets].join('+')}` : ''}${policy.readonly ? ' · Nur-Lesen' : ''}.`);
 }

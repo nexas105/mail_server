@@ -15,6 +15,7 @@ import { createMcpServer } from './mcp-tools.js';
 import { policy, configure } from './mcp-policy.js';
 import { verifyMcpToken, countActiveMcpTokens } from './mcp-access.js';
 import { receiveUpload, rememberBaseUrl, UPLOAD_MAX_BYTES } from './mcp-uploads.js';
+import { parseToolsets } from './mcp-toolsets.js';
 
 const log = (...args) => console.error('[mcp-http]', ...args);
 const list = v => String(v || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -166,8 +167,12 @@ export async function startHttpServer() {
   const isInitialize = body => (Array.isArray(body) ? body : [body])
     .some(m => m && typeof m === 'object' && m.method === 'initialize');
 
-  app.all(PATH_, async (req, res) => {
+  // /mcp = alle Werkzeuge, /mcp/mail, /mcp/whatsapp, /mcp/mail+contacts … = nur diese Sets.
+  app.all([PATH_, `${PATH_}/:toolsets`], async (req, res) => {
     const sessionId = req.get('mcp-session-id');
+    let toolsets = null;
+    try { toolsets = parseToolsets(req.params.toolsets); }
+    catch (e) { return res.status(404).json({ jsonrpc: '2.0', error: { code: -32000, message: e.message }, id: null }); }
 
     try {
       // Bestehende Sitzung
@@ -209,7 +214,7 @@ export async function startHttpServer() {
 
       // Herkunft der Sitzung: landet im Protokoll, und ein nur-lesendes Token
       // bekommt gar nicht erst die schreibenden Werkzeuge angeboten.
-      const server = createMcpServer(req.mcpAuth || { transport: 'http' });
+      const server = createMcpServer({ ...(req.mcpAuth || { transport: 'http' }), toolsets });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => crypto.randomUUID(),
         // Schützt davor, dass eine Website im Browser des Nutzers per DNS-Rebinding

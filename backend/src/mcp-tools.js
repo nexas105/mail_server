@@ -8,7 +8,8 @@ import { fetchContacts } from './carddav.js';
 import { fetchInbox, verifyImap, listMailboxes, createMailbox, moveMessages, fetchMessageAttachments } from './imap.js';
 import { createReplyDraft } from './reply.js';
 import * as gh from './github.js';
-import { policy, assertToolAllowed, resolveAttachmentPath } from './mcp-policy.js';
+import { policy, assertToolAllowed, resolveAttachmentPath, isReadTool } from './mcp-policy.js';
+import { TOOLSETS, toolsetsOf, inToolsets } from './mcp-toolsets.js';
 import { getServiceToken } from './auth.js';
 import { trackingBaseUrl, trackingReachable } from './tracking.js';
 import { logMcpEvent, summarizeArgs } from './mcp-access.js';
@@ -33,7 +34,42 @@ const CATALOG = new Map();
 
 export function toolCatalog() {
   if (!CATALOG.size) createMcpServer();   // einmal bauen, nur um die Namen zu kennen
-  return [...CATALOG].map(([name, description]) => ({ name, description }));
+  return [...CATALOG].map(([name, description]) => ({ name, description, toolsets: toolsetsOf(name) }));
+}
+
+/**
+ * Hinweise für MCP-Clients (Feld `instructions` beim initialize). Kurz halten:
+ * das steht in JEDEM Kontext, auch wenn kein Werkzeug benutzt wird.
+ */
+function buildInstructions(selected) {
+  const has = s => !selected || selected.has(s);
+  const lines = ['mail-server: E-Mail und WhatsApp des Nutzers. Antworten sind kompaktes JSON.'];
+  lines.push('Vor dem Verfassen einer Nachricht an eine Person: get_writing_briefing (Kontext, Stil, fehlende Angaben).');
+  if (has('mail')) {
+    lines.push('Mail: create_draft/reply_to_message legen nur Entwürfe an, der Nutzer sendet in der UI. '
+      + 'send_draft nur auf ausdrücklichen Wunsch. Mails finden: search_messages (gefiltert) statt list_inbox; '
+      + 'get_message liefert standardmäßig nur Text (format="html" für HTML).');
+  }
+  if (has('whatsapp')) {
+    lines.push('WhatsApp: list_wa_chats → list_wa_messages(chat_id). send_wa_* SENDET SOFORT ohne Vorschau – '
+      + 'nur mit bestätigtem Empfänger und Wortlaut.');
+  }
+  if (selected) {
+    const off = Object.keys(TOOLSETS).filter(s => !selected.has(s));
+    if (off.length) lines.push(`Dieser Zugang zeigt nur: ${[...selected].join(', ')}. Ausgeblendet: ${off.join(', ')}.`);
+  }
+  return lines.join('\n');
+}
+
+/** Hinweise für den Client, was ein Werkzeug tut – aus dem Namen abgeleitet. */
+function annotationsFor(name) {
+  const readOnly = isReadTool(name);
+  return {
+    readOnlyHint: readOnly,
+    destructiveHint: !readOnly && /^(delete_|remove_|merge_|move_|unlink_|cancel_)/.test(name),
+    openWorldHint: /^(send_|sync_|reply_|test_send|resend_|schedule_|verify_|fetch_|create_mailbox|move_messages|mark_wa|transcribe|link_contact_repo)/.test(name)
+      || /repo/.test(name),
+  };
 }
 
 /**
@@ -43,13 +79,17 @@ export function toolCatalog() {
  */
 export function createMcpServer(ctx = {}) {
   const readOnlySession = !!ctx.readonly;
+  // null = alle Sets; sonst nur die gewählten (siehe mcp-toolsets.js).
+  const selected = ctx.toolsets ?? null;
 
-  // Werkzeuge, die die Richtlinie verbietet (MCP_READONLY, MCP_DISABLED_TOOLS)
-  // oder die ein nur-lesendes Token ausschließt, werden gar nicht erst
-  // registriert – sie tauchen dann auch in tools/list nicht auf.
+  // Werkzeuge, die die Richtlinie verbietet (MCP_READONLY, MCP_DISABLED_TOOLS),
+  // die ein nur-lesendes Token ausschließt oder die nicht zum gewählten
+  // Werkzeug-Set gehören, werden gar nicht erst registriert – sie tauchen dann
+  // auch in tools/list nicht auf und kosten keinen Kontext.
   const tool = (name, description, ...rest) => {
     if (!assertToolAllowed(name, { readonly: readOnlySession })) return undefined;
-    CATALOG.set(name, String(description || '').split(/(?<=\.)\s/)[0]);
+    if (!selected) CATALOG.set(name, String(description || '').split(/(?<=\.)\s/)[0]);
+    if (!inToolsets(name, selected)) return undefined;
 
     // Jeden Aufruf protokollieren: Werkzeug, Dauer, Erfolg und eine knappe
     // Zusammenfassung der Argumente – ohne Inhalte. Ein MCP-Server handelt
@@ -75,6 +115,8 @@ export function createMcpServer(ctx = {}) {
         }
       };
     }
+    // Form hier immer (schema, handler) → Annotationen dazwischenschieben.
+    if (rest.length === 2) return server.tool(name, description, rest[0], annotationsFor(name), rest[1]);
     return server.tool(name, description, ...rest);
   };
 
@@ -84,12 +126,33 @@ export function createMcpServer(ctx = {}) {
 // LINK: öffentliche Adresse für open_in_ui & Co.; fällt auf UI zurück.
 const UI = process.env.MAIL_UI_URL || `http://localhost:${process.env.PORT || 3000}`;
 const LINK = String(process.env.MAIL_PUBLIC_URL || UI).replace(/\/+$/, '');
-const server = new McpServer({ name: 'mail-server', version: '1.0.0' });
+const server = new McpServer(
+  { name: 'mail-server', version: '1.1.0' },
+  { instructions: buildInstructions(selected) },
+);
 
-const ok = obj => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] });
+// Kompaktes JSON: Einrückung kostet bei Listen gut ein Drittel mehr Token,
+// ohne dass ein Modell sie zum Lesen braucht. null/undefined fallen weg.
+const ok = obj => ({ content: [{ type: 'text', text: JSON.stringify(obj, (k, v) => (v === null ? undefined : v)) ?? 'null' }] });
 const draftLink = id => `${LINK}/draft/${id}`;
 // Uploads gehören dem Token, das sie angelegt hat (siehe mcp-uploads.js).
 const uploadOwner = `${ctx.tokenId ?? ''}|${ctx.tokenName ?? ''}`;
+
+/** Grobes HTML → Text für Mails ohne Text-Teil. Reicht zum Verstehen, nicht zum Rendern. */
+const htmlToPlain = html => String(html)
+  .replace(/<(style|script|head)[\s\S]*?<\/\1>/gi, '')
+  .replace(/<br\s*\/?>|<\/(p|div|tr|li|h\d)>/gi, '\n')
+  .replace(/<[^>]+>/g, '')
+  .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+  .replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*\n+/g, '\n\n').trim();
+
+/** Mail-Zeile für Übersichten: nur was man zum Auswählen braucht. */
+const compactMessage = m => ({
+  id: m.id, account_id: m.account_id, folder: m.folder,
+  from: m.from_name ? `${m.from_name} <${m.from_email}>` : m.from_email,
+  subject: m.subject, date: m.date, snippet: m.snippet ? String(m.snippet).slice(0, 160) : undefined,
+  unread: !m.seen || undefined, flagged: !!m.flagged || undefined, answered: !!m.answered || undefined,
+});
 
 const recipientSchema = z.object({
   email: z.string().email(),
@@ -346,7 +409,22 @@ tool(
 );
 
 // ---- E-Mail-Vorlagen ------------------------------------------------------
-tool('list_templates', 'Gespeicherte E-Mail-Vorlagen (Betreff + HTML).', {}, async () => ok(db.listTemplates()));
+tool(
+  'list_templates',
+  'Gespeicherte E-Mail-Vorlagen – nur id, Name, Art und Betreff. Den HTML-Inhalt liefert get_template.',
+  { kind: z.enum(['full', 'header', 'body', 'footer']).optional() },
+  async ({ kind }) => ok(db.listTemplates(kind).map(t => ({ id: t.id, name: t.name, kind: t.kind, subject: t.subject || undefined }))),
+);
+tool(
+  'get_template',
+  'Eine Vorlage mit vollem HTML.',
+  { id: z.number().int() },
+  async ({ id }) => {
+    const t = db.getTemplate(id);
+    if (!t) throw new Error('Vorlage nicht gefunden');
+    return ok(t);
+  },
+);
 tool(
   'create_template',
   'Legt eine wiederverwendbare Vorlage an. kind: "full" (Betreff+Body), "header" (oben) oder "footer" (unten). {{name}}/{{email}}/Custom-Felder erlaubt.',
@@ -592,8 +670,44 @@ tool(
 );
 
 // ---- Kontakte & Listen ----------------------------------------------------
-tool('list_contacts', 'Gespeicherte Kontakte.', {}, async () => ok(db.listContacts()));
-tool('list_lists', 'Kontaktlisten inkl. Mitglieder.', {}, async () => ok(db.listLists()));
+tool(
+  'list_contacts',
+  'Kontakte aus dem Adressbuch (id, name, email, company, phone). Mit query suchen statt alles zu laden.',
+  {
+    query: z.string().optional().describe('Teilstring in Name, Adresse oder Firma'),
+    limit: z.number().int().optional().default(50),
+    offset: z.number().int().optional().default(0),
+  },
+  async ({ query, limit, offset }) => {
+    const q = String(query || '').toLowerCase();
+    const all = db.listContacts().filter(c => !q
+      || [c.name, c.email, c.company].some(v => String(v || '').toLowerCase().includes(q)));
+    return ok({
+      total: all.length,
+      contacts: all.slice(offset, offset + limit).map(c => ({
+        id: c.id, name: c.name, email: c.email, company: c.company, phone: c.phone,
+        repos: c.repo_count || undefined,
+      })),
+    });
+  },
+);
+tool(
+  'list_lists',
+  'Kontaktlisten mit Mitgliederzahl. Mitglieder nur mit list_id oder include_members=true.',
+  {
+    list_id: z.number().int().optional().describe('Nur diese Liste, inkl. Mitglieder'),
+    include_members: z.boolean().optional().default(false),
+  },
+  async ({ list_id, include_members }) => {
+    const lists = db.listLists().filter(l => list_id == null || l.id === list_id);
+    return ok(lists.map(l => ({
+      id: l.id, name: l.name, member_count: l.members.length,
+      members: (include_members || list_id != null)
+        ? l.members.map(c => ({ id: c.id, name: c.name, email: c.email }))
+        : undefined,
+    })));
+  },
+);
 tool(
   'add_contact',
   'Legt einen Kontakt an bzw. aktualisiert ihn – inkl. Variablen (company/phone/notes + freie vars). '
@@ -685,12 +799,18 @@ tool(
 );
 tool(
   'list_inbox',
-  'Listet empfangene Mails (Übersicht ohne Volltext). Optional nach Account gefiltert.',
+  'Neueste empfangene Mails eines Ordners (Übersicht ohne Volltext). Für Gezieltes search_messages nehmen.',
   {
     account_id: z.number().int().optional().describe('Optional: nur Mails dieses Accounts'),
-    limit: z.number().int().optional().default(50),
+    folder: z.string().optional().default('INBOX'),
+    unread_only: z.boolean().optional().default(false),
+    limit: z.number().int().optional().default(25),
   },
-  async ({ account_id, limit }) => ok(db.listMessages({ accountId: account_id ?? null, limit })),
+  async ({ account_id, folder, unread_only, limit }) => {
+    let rows = db.listMessages({ accountId: account_id ?? null, folder, limit: unread_only ? limit * 4 : limit });
+    if (unread_only) rows = rows.filter(m => !m.seen).slice(0, limit);
+    return ok(rows.map(compactMessage));
+  },
 );
 tool(
   'search_messages',
@@ -710,20 +830,35 @@ tool(
     db.searchMessages({
       accountId: account_id ?? null, folder: folder ?? null, from: from ?? null,
       subject: subject ?? null, text: text ?? null, since: since ?? null, until: until ?? null, limit,
-    })),
+    }).map(compactMessage)),
 );
 tool(
   'get_message',
-  'Liefert eine empfangene Mail inkl. Text/HTML-Body. Lesen verändert nichts – die Mail bleibt '
-  + 'ungelesen, solange nicht mark_seen=true gesetzt wird (oder set_message_flags genutzt wird).',
+  'Liefert eine empfangene Mail. Standard: nur der Text (gekürzt auf max_chars) – HTML ist meist '
+  + 'zehnmal so lang und bringt fürs Verstehen nichts; nur mit format="html" anfordern. Lesen verändert '
+  + 'nichts, außer mit mark_seen=true.',
   {
     id: z.number().int(),
+    format: z.enum(['text', 'html', 'both']).optional().default('text'),
+    max_chars: z.number().int().optional().default(8000).describe('Body-Länge kappen; 0 = ungekürzt'),
     mark_seen: z.boolean().optional().default(false)
       .describe('true = Mail dabei als gelesen markieren. Im Nur-Lesen-Betrieb ohne Wirkung.'),
   },
-  async ({ id, mark_seen }) => {
-    const m = db.getMessage(id);
-    if (!m) return ok({ error: 'Mail nicht gefunden' });
+  async ({ id, format, max_chars, mark_seen }) => {
+    const row = db.getMessage(id);
+    if (!row) return ok({ error: 'Mail nicht gefunden' });
+    const cut = s => (s && max_chars > 0 && s.length > max_chars ? s.slice(0, max_chars) : s);
+    const { html, text, raw, ...m } = row;
+    const plain = text || (html ? htmlToPlain(html) : '');
+    if (format !== 'html') m.text = cut(plain);
+    if (format !== 'text') m.html = cut(html);
+    const full = format === 'html' ? html : plain;
+    if (full && max_chars > 0 && full.length > max_chars) {
+      m.truncated = true;
+      m.total_chars = full.length;
+    }
+    const files = db.listMessageAttachments(id);
+    if (files.length) m.attachments = files.map(a => ({ id: a.id, filename: a.filename, mimetype: a.mimetype, size: a.size }));
     // Früher wurde hier immer als gelesen markiert – ein Schreibzugriff hinter
     // einem get_-Werkzeug, den auch nur-lesende Token ausgelöst haben. Jetzt nur
     // auf Wunsch, und nie, wenn Richtlinie oder Token nur lesen dürfen.

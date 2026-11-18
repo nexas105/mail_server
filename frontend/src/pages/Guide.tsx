@@ -12,6 +12,7 @@ type Connect = 'local' | 'server';
 const SECTIONS: { id: string; icon: IconName; label: string }[] = [
   { id: 'ablauf', icon: 'sparkle', label: 'So arbeitet ihr zusammen' },
   { id: 'anbinden', icon: 'command', label: 'KI-Client anbinden' },
+  { id: 'sets', icon: 'template', label: 'Mail & WhatsApp getrennt' },
   { id: 'grenzen', icon: 'alert', label: 'Was die KI darf' },
   { id: 'zugriff', icon: 'users', label: 'Zugriff ohne Browser' },
   { id: 'zustellung', icon: 'eye', label: 'Zustellung nachverfolgen' },
@@ -45,7 +46,7 @@ const GROUPS: { title: string; icon: IconName; note: string; names: string[] }[]
   {
     title: 'Vorlagen, Marken & Variablen', icon: 'template',
     note: 'Bausteine und Wertesätze – dieselbe Vorlage bedient mehrere Auftritte.',
-    names: ['list_templates', 'create_template', 'update_template', 'delete_template',
+    names: ['list_templates', 'get_template', 'create_template', 'update_template', 'delete_template',
       'list_custom_fields', 'set_custom_field', 'delete_custom_field',
       'list_brands', 'set_brand', 'apply_brand_to_draft', 'set_default_brand', 'delete_brand'],
   },
@@ -154,6 +155,14 @@ export MCP_TOKEN=$(openssl rand -hex 32)`;
   }
 }`;
 
+  const toolsetsHttp = `https://mcp.example.de/mcp            # alle Werkzeuge
+https://mcp.example.de/mcp/mail       # nur E-Mail
+https://mcp.example.de/mcp/whatsapp   # nur WhatsApp
+https://mcp.example.de/mcp/mail+contacts   # kombinierbar`;
+
+  const toolsetsLocal = `claude mcp add mail -- "${node}" "${mcp}" --toolset=mail
+claude mcp add whatsapp -- "${node}" "${mcp}" --toolset=whatsapp`;
+
   const policy = `MCP_READONLY=1                                    # nur lesende Werkzeuge
 MCP_DISABLED_TOOLS=send_draft,delete_smtp_account # einzelne abschalten
 MCP_ENABLED_TOOLS=list_drafts,get_draft           # Positivliste, Rest bleibt aus
@@ -259,6 +268,25 @@ MAIL_WA_MCP_SEND=1                                # erst damit darf die KI Whats
             </div>
           </>
         )}
+      </div>
+
+      {/* ------------------------------------------------------ Werkzeug-Sets */}
+      <div className="card" id="sets">
+        <div className="toolbar"><Icon name="template" size={16} /><strong className="grow">Getrennte Zugänge: Mail und WhatsApp</strong></div>
+        <p className="muted small" style={{ marginTop: 0 }}>
+          Jedes Werkzeug kostet den KI-Client Kontext – alle zusammen rund 22.000 Token, bevor
+          überhaupt etwas passiert. Darum lässt sich der Server in Sets aufteilen:
+          {' '}<code>mail</code> (~9.000), <code>whatsapp</code> (~4.500), <code>contacts</code>,
+          {' '}<code>design</code> (Vorlagen, Marken, Bilder), <code>github</code>, <code>admin</code>.
+          Das Schreib-Briefing steckt in Mail und WhatsApp.
+        </p>
+        <h2 style={{ marginTop: 12 }}>Über HTTP – eigener Pfad je Set</h2>
+        <CodeBlock code={toolsetsHttp} lang="bash" />
+        <h2 style={{ marginTop: 12 }}>Lokal (stdio) – zwei getrennte Einträge</h2>
+        <CodeBlock code={toolsetsLocal} lang="bash" />
+        <p className="muted small" style={{ marginBottom: 0 }}>
+          Alternativ per Umgebung: <code>MCP_TOOLSETS=whatsapp,contacts</code>. Ohne Angabe gibt es wie bisher alle Werkzeuge.
+        </p>
       </div>
 
       {/* ----------------------------------------------------------- Grenzen */}

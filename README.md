@@ -385,6 +385,42 @@ nicht auf.
 Die vollständige, immer aktuelle Liste steht in der Web-UI unter **Anleitung**;
 sie liest sie über `GET /api/mcp/tools` direkt aus dem laufenden Server.
 
+### Werkzeug-Sets: Mail und WhatsApp getrennt anbinden
+
+Alle Werkzeuge zusammen belegen im KI-Client rund 22.000 Token Kontext, bevor
+überhaupt etwas passiert. Deshalb lässt sich der Server in Sets aufteilen:
+
+| Set | Inhalt | ca. Token |
+|---|---|---|
+| `mail` | Posteingang lesen/suchen/sortieren, Entwürfe, Antworten, Anhänge, Versand | 9.000 |
+| `whatsapp` | Chats, Nachrichten, Senden, Planen, Sprachnachrichten | 4.500 |
+| `contacts` | Adressbuch, Listen, Kontakt-Kontext, Schreibstile, Regeln | 4.700 |
+| `design` | Vorlagen, Marken, Platzhalter-Felder, Bilder | 2.200 |
+| `github` | An Kontakten verknüpfte Repos | 1.800 |
+| `admin` | SMTP/IMAP-Konten, Einstellungen, Tracking | 1.800 |
+
+`get_writing_briefing` und der Kontakt-Kontext stecken in `mail` und
+`whatsapp`, `list_contacts`/`list_lists`/`list_smtp_accounts` zusätzlich in `mail`.
+
+```bash
+# HTTP: eigener Pfad je Set, mit + kombinierbar
+https://mcp.example.com/mcp/mail
+https://mcp.example.com/mcp/whatsapp
+https://mcp.example.com/mcp/mail+contacts
+https://mcp.example.com/mcp                 # alle, wie bisher
+
+# stdio: zwei getrennte Einträge
+claude mcp add mail     -- node /pfad/zu/backend/src/mcp-server.js --toolset=mail
+claude mcp add whatsapp -- node /pfad/zu/backend/src/mcp-server.js --toolset=whatsapp
+# oder MCP_TOOLSETS=whatsapp,contacts
+```
+
+Auch die Antworten sind auf Kontext getrimmt: kompaktes JSON ohne `null`-Felder,
+`get_message` liefert standardmäßig nur Text (gekürzt über `max_chars`, HTML mit
+`format="html"`), `list_inbox`/`search_messages` nur Übersichtszeilen,
+`list_contacts` mit `query`/`limit`, `list_lists` ohne Mitglieder (außer mit
+`list_id`), `list_templates` ohne HTML (dafür `get_template`).
+
 Typischer Ablauf: „Schreib eine HTML-Einladung an meine Liste 'Kunden'". Claude
 ruft `create_draft` und `add_recipients_from_list` auf und gibt dir den
 `open_in_ui`-Link; du prüfst die Vorschau und klickst **Senden**.
