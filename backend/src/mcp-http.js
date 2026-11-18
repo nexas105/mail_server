@@ -16,6 +16,7 @@ import { policy, configure } from './mcp-policy.js';
 import { verifyMcpToken, countActiveMcpTokens } from './mcp-access.js';
 import { receiveUpload, rememberBaseUrl, UPLOAD_MAX_BYTES } from './mcp-uploads.js';
 import { parseToolsets } from './mcp-toolsets.js';
+import { mountOAuth, oauthChallenge } from './mcp-oauth.js';
 
 const log = (...args) => console.error('[mcp-http]', ...args);
 const list = v => String(v || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -101,6 +102,9 @@ export async function startHttpServer() {
     return res.json(r.data);
   });
 
+  // ---- OAuth für Clients ohne festen Header (ChatGPT), siehe mcp-oauth.js --
+  if (process.env.MCP_OAUTH !== '0') mountOAuth(app, { mcpPath: PATH_, envToken: TOKEN });
+
   // ---- Token-Prüfung ------------------------------------------------------
   app.use(PATH_, (req, res, next) => {
     // Öffentliche Adresse für Upload-URLs merken (falls MCP_PUBLIC_URL fehlt).
@@ -123,7 +127,9 @@ export async function startHttpServer() {
       req.mcpAuth = { transport: 'http', tokenName: 'anonym' };
       return next();
     }
-    res.set('WWW-Authenticate', 'Bearer realm="mail-server-mcp"');
+    res.set('WWW-Authenticate', process.env.MCP_OAUTH !== '0'
+      ? oauthChallenge(req, req.originalUrl.split('?')[0])
+      : 'Bearer realm="mail-server-mcp"');
     return res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'Unauthorized' }, id: null });
   });
 
